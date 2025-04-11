@@ -5,7 +5,28 @@ import os
 
 app = Flask(__name__)
 
-# Template HTML avec instructions de connexion RDP mises à jour
+def get_available_images():
+    """Récupère la liste des images disponibles depuis le fichier images.txt"""
+    images = []
+    try:
+        with open('images.txt', 'r') as f:
+            for line in f:
+                if line.strip() and not line.strip().startswith('#'):
+                    parts = line.strip().split(':')
+                    if len(parts) >= 2:
+                        images.append({
+                            'id': parts[0],
+                            'name': parts[1]
+                        })
+    except Exception as e:
+        print(f"Erreur lors de la lecture des images: {str(e)}")
+        # Fallback à une liste par défaut
+        images = [
+            {'id': 'xfce_gui_container', 'name': 'Bureau XFCE (Léger)'}
+        ]
+    return images
+
+# Template HTML avec instructions de connexion RDP et sélecteur d'images
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html>
@@ -83,6 +104,15 @@ HTML_TEMPLATE = '''
                 <input type="password" id="password" name="password" required>
             </div>
             
+            <div class="form-group">
+                <label for="image">Type de bureau virtuel :</label>
+                <select id="image" name="image">
+                    {% for image in images %}
+                    <option value="{{ image.id }}">{{ image.name }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            
             <button type="submit">Exécuter</button>
         </form>
     </div>
@@ -130,17 +160,19 @@ HTML_TEMPLATE = '''
 
 @app.route('/')
 def index():
-    return render_template_string(HTML_TEMPLATE)
+    images = get_available_images()
+    return render_template_string(HTML_TEMPLATE, images=images)
 
 @app.route('/execute', methods=['POST'])
 def execute_script():
     choice = request.form.get('choice', '1')
     username = request.form.get('username', '')
     password = request.form.get('password', '')
+    image = request.form.get('image', 'xfce_gui_container')  # Nouvelle ligne pour récupérer le choix d'image
     
     # Créer un fichier temporaire avec les entrées
     with tempfile.NamedTemporaryFile(mode='w', delete=False) as temp:
-        temp.write(f"{choice}\n{username}\n{password}\n")
+        temp.write(f"{choice}\n{username}\n{password}\n{image}\n")  # Ajout de l'image
         temp_name = temp.name
     
     try:

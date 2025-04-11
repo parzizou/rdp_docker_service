@@ -12,7 +12,7 @@ for container in $(docker ps --filter "name=$CONTAINER_PREFIX" --format "{{.Name
     username=${container#${CONTAINER_PREFIX}}
     
     # Vérifier l'activité RDP
-    connections=$(docker exec "$container" netstat -ant 2>/dev/null | grep ":3390" | grep "ESTABLISHED" | wc -l)
+    connections=$(docker exec "$container" netstat -ant 2>/dev/null | grep -q ":3390" || grep -q ":3389" | grep "ESTABLISHED" | wc -l)
     
     if [ "$connections" -eq 0 ]; then
         # Créer un fichier de timestamp pour la dernière activité si nécessaire
@@ -39,7 +39,7 @@ for container in $(docker ps --filter "name=$CONTAINER_PREFIX" --format "{{.Name
         if [ "$inactive_time" -gt "$INACTIVE_TIMEOUT" ]; then
             echo "Conteneur $container inactif depuis $(($inactive_time / 60)) minutes, arrêt..." | tee -a "$LOG_FILE"
             
-            # Arrêter le conteneur (au lieu de le mettre en pause)
+            # Arrêter le conteneur
             docker stop "$container" >> "$LOG_FILE" 2>&1
             
             # Enregistrer le conteneur comme suspendu

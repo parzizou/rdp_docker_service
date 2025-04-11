@@ -1,1 +1,27 @@
 
+jeu. 10 avril 2025 14:00:01 CEST - Démarrage du nettoyage des conteneurs inactifs
+jeu. 10 avril 2025 14:00:01 CEST - Démarrage du nettoyage des conteneurs inactifs
+jeu. 10 avril 2025 14:00:01 CEST - Fin du nettoyage
+jeu. 10 avril 2025 14:00:01 CEST - Fin du nettoyage
+jeu. 10 avril 2025 15:00:01 CEST - Démarrage du nettoyage des conteneurs inactifs
+jeu. 10 avril 2025 15:00:01 CEST - Démarrage du nettoyage des conteneurs inactifs
+jeu. 10 avril 2025 15:00:01 CEST - Fin du nettoyage
+jeu. 10 avril 2025 15:00:01 CEST - Fin du nettoyage
+jeu. 10 avril 2025 16:00:01 CEST - Démarrage du nettoyage des conteneurs inactifs
+jeu. 10 avril 2025 16:00:01 CEST - Démarrage du nettoyage des conteneurs inactifs
+Conteneur gui_user_bbb inactif depuis 0 minutes, en attente...
+Conteneur gui_user_bbb inactif depuis 0 minutes, en attente...
+/home/psykokwak/gui-container-service/./cleanup_inactive.sh: ligne 17 : [:  : nombre entier attendu comme expression
+/home/psykokwak/gui-container-service/./cleanup_inactive.sh: ligne 17 : [:  : nombre entier attendu comme expression
+Conteneur gui_user_aaa actif avec  connexion(s)
+Conteneur gui_user_aaa actif avec  connexion(s)
+/home/psykokwak/gui-container-service/./cleanup_inactive.sh: ligne 17 : [:  : nombre entier attendu comme expression
+/home/psykokwak/gui-container-service/./cleanup_inactive.sh: ligne 17 : [:  : nombre entier attendu comme expression
+Conteneur gui_user_yyy actif avec  connexion(s)
+Conteneur gui_user_yyy actif avec  connexion(s)
+/home/psykokwak/gui-container-service/./cleanup_inactive.sh: ligne 17 : [:  : nombre entier attendu comme expression
+/home/psykokwak/gui-container-service/./cleanup_inactive.sh: ligne 17 : [:  : nombre entier attendu comme expression
+Conteneur gui_user_xxx actif avec  connexion(s)
+Conteneur gui_user_xxx actif avec  connexion(s)
+jeu. 10 avril 2025 16:00:02 CEST - Fin du nettoyage
+jeu. 10 avril 2025 16:00:02 CEST - Fin du nettoyage
