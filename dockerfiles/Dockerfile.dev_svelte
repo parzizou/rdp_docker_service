@@ -1,0 +1,59 @@
+FROM ubuntu:22.04
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Installation des paquets de base
+RUN apt-get update && apt-get install -y \
+    kde-plasma-desktop xrdp dbus-x11 \
+    wget python3-pip python3-venv ffmpeg screen \
+    curl git build-essential unzip gosu sudo \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Configuration du fuseau horaire
+RUN ln -snf /usr/share/zoneinfo/Europe/Paris /etc/localtime && echo Europe/Paris > /etc/timezone
+
+# Configuration de XRDP
+RUN adduser xrdp ssl-cert && \
+    sed -i 's|exec /bin/sh /etc/X11/Xsession|/usr/bin/startplasma-x11|' /etc/xrdp/startwm.sh
+
+# Optimisation des paramètres XRDP
+RUN sed -i "\
+    s|max_bpp=32|max_bpp=16|; \
+    s|xserverbpp=24|xserverbpp=16|; \
+    s|#enable_dynamic_resizing=false|enable_dynamic_resizing=true|; \
+    s|#perf.allow_client_experiencesettings=true|perf.allow_client_experiencesettings=true|; \
+    s|#neutrinordp.allow_client_keyboardLayout=true|neutrinordp.allow_client_keyboardLayout=true| \
+    " /etc/xrdp/xrdp.ini
+
+RUN sed -i "\
+    s/AllowRootLogin=true/AllowRootLogin=false/g; \
+    s/EnableSyslog=1/EnableSyslog=0/g \
+    " /etc/xrdp/sesman.ini
+
+# Installation de Firefox
+RUN install -d -m 0755 /etc/apt/keyrings && \
+    wget -q https://packages.mozilla.org/apt/repo-signing-key.gpg -O- | tee /etc/apt/keyrings/packages.mozilla.org.asc > /dev/null && \
+    echo "deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main" | tee -a /etc/apt/sources.list.d/mozilla.list > /dev/null && \
+    echo 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000' | tee /etc/apt/preferences.d/mozilla && \
+    apt-get update && apt-get install -y firefox
+
+# Installation de Node.js v22
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    apt-get install -y nodejs && \
+    node -v
+
+# Installation de Bun
+RUN curl -fsSL https://bun.sh/install | bash
+
+# Ajout du script d'entrée
+COPY entrypoint.dev_svelte.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# Configuration du port RDP (on garde la compatibilité avec le reste de votre système)
+RUN sed -i 's/port=3389/port=3390/g' /etc/xrdp/xrdp.ini
+
+# Exposition des ports
+EXPOSE 3390 5173
+
+ENV PATH="/root/.bun/bin:/opt/venv/bin:$PATH"
+
+ENTRYPOINT ["/entrypoint.sh"]
