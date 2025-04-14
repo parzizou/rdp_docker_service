@@ -79,6 +79,15 @@ HTML_TEMPLATE = '''
             padding: 10px;
             margin: 15px 0;
         }
+        .checkbox-container {
+            display: flex;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        .checkbox-container input {
+            width: auto;
+            margin-right: 10px;
+        }
     </style>
 </head>
 <body>
@@ -111,6 +120,11 @@ HTML_TEMPLATE = '''
                     <option value="{{ image.id }}">{{ image.name }}</option>
                     {% endfor %}
                 </select>
+            </div>
+            
+            <div class="checkbox-container">
+                <input type="checkbox" id="use_gpu" name="use_gpu" value="true">
+                <label for="use_gpu">Utiliser le GPU (recommandé pour les applications graphiques intensives)</label>
             </div>
             
             <button type="submit">Exécuter</button>
@@ -168,20 +182,25 @@ def execute_script():
     choice = request.form.get('choice', '1')
     username = request.form.get('username', '')
     password = request.form.get('password', '')
-    image = request.form.get('image', 'xfce_gui_container')  # Nouvelle ligne pour récupérer le choix d'image
+    image = request.form.get('image', 'xfce_gui_container')
+    
+    # Récupérer l'option GPU (cochée = "true", non-cochée = None)
+    use_gpu = "o" if request.form.get('use_gpu') == "true" else "n"
     
     # Créer un fichier temporaire avec les entrées
     with tempfile.NamedTemporaryFile(mode='w', delete=False) as temp:
-        temp.write(f"{choice}\n{username}\n{password}\n{image}\n")  # Ajout de l'image
+        temp.write(f"{choice}\n{username}\n{password}\n{image}\n{use_gpu}\n")
         temp_name = temp.name
     
     try:
-        # Exécuter le script avec les entrées du fichier
+        # Exécuter le script avec les entrées du fichier et s'assurer que stdin est correctement géré
         result = subprocess.run(
             f"cat {temp_name} | bash ./script.sh", 
             shell=True, 
             capture_output=True, 
-            text=True
+            text=True,
+            encoding='utf-8',
+            errors='replace'
         )
         
         # Supprimer le fichier temporaire
@@ -191,6 +210,10 @@ def execute_script():
         output = result.stdout
         if result.stderr:
             output += "\nErreurs:\n" + result.stderr
+            
+        # S'assurer que la sortie n'est pas vide
+        if not output or output.strip() == "":
+            output = "⚠️ Avertissement: Le script n'a pas généré de sortie. Vérifiez le script ou les logs."
             
         return output
     except Exception as e:

@@ -18,8 +18,8 @@ touch "$USER_FILE" "$PORT_FILE"
 # Fonction pour obtenir les informations de l'image depuis le fichier de configuration
 get_image_info() {
     local image_name=$1
-    local info_type=$2  # name, port, cpu, memory, extra, volumes, extra_ports
-    local default_values=("$image_name" "3390" "1" "2g" "" "")
+    local info_type=$2  # name, port, cpu, memory, extra, volumes, extra_ports, gpu
+    local default_values=("$image_name" "3390" "1" "2g" "" "" "" "true")
     local index=0
     
     # Définir l'index selon le type d'information demandé
@@ -30,6 +30,7 @@ get_image_info() {
         "memory") index=4 ;;
         "extra") index=5 ;;
         "volumes") index=6 ;;
+        "gpu") index=7 ;;
         *) index=0 ;;  # Par défaut, renvoie l'ID de l'image
     esac
     
@@ -69,7 +70,6 @@ get_image_info() {
 # Fonction pour chiffrer un mot de passe avec bcrypt
 encrypt_password() {
     local password=$1
-    # Utilise python3 pour la compatibilité universelle
     echo -n "$password" | python3 -c 'import bcrypt, sys; print(bcrypt.hashpw(sys.stdin.read().encode(), bcrypt.gensalt()).decode())'
 }
 
@@ -197,29 +197,6 @@ check_container_activity() {
     fi
 }
 
-# Arrête un conteneur inactif
-stop_inactive_container() {
-    local container_name=$1
-    echo "Arrêt du conteneur inactif: $container_name"
-    docker stop "$container_name"
-    
-    # Enregistrer l'état pour pouvoir le reprendre plus tard
-    echo "$container_name" >> "suspended_containers.txt"
-}
-
-# Ajoute des limites de ressources aux conteneurs
-apply_resource_limits() {
-    local container_name=$1
-    local container_image=$2
-    
-    # Récupère les limites de ressources depuis le fichier de configuration
-    local cpu_limit=$(get_image_info "$container_image" "cpu")
-    local memory_limit=$(get_image_info "$container_image" "memory")
-    
-    echo "Application des limites de ressources pour $container_name (CPU: $cpu_limit, Mémoire: $memory_limit)"
-    docker update --cpus="$cpu_limit" --memory="$memory_limit" --memory-swap="$memory_limit" "$container_name"
-}
-
 # Parse les volumes supplémentaires définis dans le fichier images.txt
 parse_volumes() {
     local image_name=$1
@@ -252,13 +229,9 @@ parse_extra_ports() {
                 port_params="$port_params -p $host_port:$container_port"
             else
                 # Si le port est occupé, essayer de trouver un port libre
-                echo "⚠️ Port $host_port déjà utilisé, recherche d'une alternative..."
                 local free_alt_port=$(find_free_port $((host_port+1)) $((host_port+100)))
                 if [ $? -eq 0 ]; then
-                    echo "🔄 Port alternatif trouvé: $free_alt_port:$container_port"
                     port_params="$port_params -p $free_alt_port:$container_port"
-                else
-                    echo "❌ Aucun port alternatif disponible pour $container_port"
                 fi
             fi
         done
@@ -279,6 +252,33 @@ parse_other_extra_params() {
     fi
     
     echo "$other_params"
+}
+
+# Fonction pour vérifier quels périphériques NVIDIA sont disponibles
+check_nvidia_devices() {
+    local devices=""
+    
+    # Vérification de la présence des périphériques NVIDIA standard
+    if [ -e "/dev/nvidia0" ]; then
+        devices="$devices --device /dev/nvidia0:/dev/nvidia0"
+    fi
+    
+    if [ -e "/dev/nvidiactl" ]; then
+        devices="$devices --device /dev/nvidiactl:/dev/nvidiactl"
+    fi
+    
+    if [ -e "/dev/nvidia-uvm" ]; then
+        devices="$devices --device /dev/nvidia-uvm:/dev/nvidia-uvm"
+    fi
+    
+    # Vérification des périphériques supplémentaires (nvidia1, nvidia2, etc.)
+    for i in {1..9}; do
+        if [ -e "/dev/nvidia$i" ]; then
+            devices="$devices --device /dev/nvidia$i:/dev/nvidia$i"
+        fi
+    done
+    
+    echo "$devices"
 }
 
 # Création du script de nettoyage périodique
@@ -330,13 +330,10 @@ for container in $(docker ps --filter "name=$CONTAINER_PREFIX" --format "{{.Name
             
             # Enregistrer le conteneur comme suspendu
             grep -q "^$container$" "$SUSPENDED_FILE" || echo "$container" >> "$SUSPENDED_FILE"
-        else
-            echo "Conteneur $container inactif depuis $(($inactive_time / 60)) minutes, en attente..." | tee -a "$LOG_FILE"
         fi
     else
         # Mettre à jour le timestamp de dernière activité
         docker exec "$container" bash -c "echo $(date +%s) > /home/$username/.last_activity" 2>/dev/null
-        echo "Conteneur $container actif avec $connections connexion(s)" | tee -a "$LOG_FILE"
     fi
 done
 
@@ -349,34 +346,204 @@ EOL
     if ! (crontab -l 2>/dev/null | grep -q "$CLEANUP_SCRIPT"); then
     # Ajouter la tâche cron pour exécuter le script toutes les heures
     (crontab -l 2>/dev/null || echo "") | { cat; echo "0 * * * * $PWD/$CLEANUP_SCRIPT >> $PWD/cleanup.log 2>&1"; } | crontab -
-    echo "Tâche cron ajoutée pour le nettoyage automatique"
     fi
 }
 
-# Initialiser les fonctionnalités d'optimisation
-initialize_optimization() {
-    # Créer le script de nettoyage
-    create_cleanup_script
+# Créer un script de test GPU à l'intérieur du conteneur
+create_gpu_test_script() {
+    local container_name=$1
+    local username=$2
     
-    # Appliquer les limites de ressources au conteneur actuel
-    apply_resource_limits "$container_name" "$image_name"
+    # Chemin du script à l'intérieur du conteneur
+    local script_path="/home/$username/test_gpu.sh"
     
-    echo "Optimisation des ressources configurée"
+    # Contenu du script
+    docker exec "$container_name" bash -c "cat > $script_path << 'EOF'
+#!/bin/bash
+echo \"==== Test de détection GPU NVIDIA ====\"
+echo \"Date: \$(date)\"
+echo \"Utilisateur: \$(whoami)\"
+echo \"\" 
+
+echo \"=== Vérification des périphériques NVIDIA ===\"
+ls -la /dev/nvidia* 2>/dev/null || echo \"❌ Aucun périphérique NVIDIA trouvé dans /dev/\"
+
+echo \"\"
+echo \"=== Test nvidia-smi ===\"
+nvidia-smi || echo \"❌ La commande nvidia-smi a échoué\"
+
+echo \"\"
+echo \"=== Variables d'environnement NVIDIA ===\"
+env | grep -i nvidia
+
+echo \"\"
+echo \"=== Modules du noyau ===\"
+lsmod | grep -i nvidia || echo \"❌ Aucun module noyau NVIDIA chargé\"
+
+echo \"\"
+echo \"=== Bibliothèques NVIDIA ===\"
+ldconfig -p | grep -i nvidia || echo \"❌ Aucune bibliothèque NVIDIA trouvée\"
+
+# Créer un test avec CUDA si disponible
+if command -v nvcc &> /dev/null; then
+    echo \"\"
+    echo \"=== Test CUDA ===\"
+    echo 'int main() { return 0; }' > test.cu
+    nvcc test.cu -o test_cuda && echo \"✅ Compilation CUDA réussie\" || echo \"❌ Échec de compilation CUDA\"
+    rm -f test.cu test_cuda
+fi
+
+# Si pip est disponible, essayer d'installer et tester pytorch
+if command -v pip3 &> /dev/null; then
+    echo \"\"
+    echo \"=== Test PyTorch (optionnel) ===\"
+    if ! python3 -c \"import torch\" 2>/dev/null; then
+        echo \"Installation de PyTorch...\"
+        pip3 install torch --index-url https://download.pytorch.org/whl/cpu || echo \"❌ Échec d'installation de PyTorch\"
+    fi
+    
+    # Test PyTorch avec CUDA
+    python3 -c \"
+import torch
+print('PyTorch version:', torch.__version__)
+print('CUDA disponible:', torch.cuda.is_available())
+if torch.cuda.is_available():
+    print('Nombre de GPUs:', torch.cuda.device_count())
+    print('Nom du GPU:', torch.cuda.get_device_name(0))
+    x = torch.rand(5, 3).cuda()
+    print('Tensor sur GPU créé avec succès')
+else:
+    print('❌ CUDA n\\'est pas disponible pour PyTorch')
+\" || echo \"❌ Échec du test PyTorch\"
+fi
+
+echo \"\"
+echo \"==== Test terminé ===\"
+EOF"
+    
+    # Rendre le script exécutable
+    docker exec "$container_name" bash -c "chmod +x $script_path && chown $username:$username $script_path"
+}
+
+# Fonction pour lancer un conteneur avec ou sans GPU
+run_container() {
+    local container_name=$1
+    local username=$2
+    local user_password=$3
+    local image_name=$4
+    local user_port=$5
+    local rdp_port=$6
+    local use_gpu=$7  # Nouveau paramètre pour spécifier si on utilise le GPU
+    
+    # Vérifier si le conteneur existe déjà et le supprimer si c'est le cas
+    if container_exists "$container_name"; then
+        echo "Le conteneur ${container_name} existe déjà, suppression en cours..."
+        docker stop ${container_name} >/dev/null 2>&1 || true
+        docker rm ${container_name} >/dev/null 2>&1 || true
+    fi
+    
+    # Récupérer les paramètres supplémentaires
+    local extra_port_params=$(parse_extra_ports "$image_name")
+    local extra_volume_params=$(parse_volumes "$image_name")
+    local other_params=$(parse_other_extra_params "$image_name")
+    local cpu_limit=$(get_image_info "$image_name" "cpu")
+    local memory_limit=$(get_image_info "$image_name" "memory")
+    
+    # Créer le répertoire de données utilisateur s'il n'existe pas
+    mkdir -p "$DATA_DIR/$username"
+    mkdir -p "$DATA_DIR/${username}_config"
+    
+    # Message différent selon si on utilise le GPU ou non
+    if [ "$use_gpu" = "true" ]; then
+        echo "Lancement d'un nouveau conteneur ${container_name} avec GPU..."
+    else
+        echo "Lancement d'un nouveau conteneur ${container_name} sans GPU..."
+    fi
+    
+    # Construire la commande docker différemment selon si on utilise le GPU ou non
+    local gpu_params=""
+    if [ "$use_gpu" = "true" ]; then
+        gpu_params="--gpus all -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=all,compute,utility,graphics"
+        
+        # Ajouter les périphériques NVIDIA
+        if [ -e "/dev/nvidia0" ]; then
+            gpu_params="$gpu_params --device /dev/nvidia0:/dev/nvidia0"
+        fi
+        if [ -e "/dev/nvidiactl" ]; then
+            gpu_params="$gpu_params --device /dev/nvidiactl:/dev/nvidiactl"
+        fi
+        
+        # Ajouter d'autres périphériques NVIDIA s'ils existent
+        if [ -e "/dev/nvidia-modeset" ]; then
+            gpu_params="$gpu_params --device /dev/nvidia-modeset:/dev/nvidia-modeset"
+        fi
+        if [ -e "/dev/nvidia-uvm" ]; then
+            gpu_params="$gpu_params --device /dev/nvidia-uvm:/dev/nvidia-uvm"
+        fi
+        if [ -e "/dev/nvidia-uvm-tools" ]; then
+            gpu_params="$gpu_params --device /dev/nvidia-uvm-tools:/dev/nvidia-uvm-tools"
+        fi
+    fi
+    
+    # Lancer le conteneur avec ou sans GPU
+    docker run -dit \
+        --name "$container_name" \
+        $gpu_params \
+        -p "$user_port:$rdp_port" \
+        $extra_port_params \
+        -e "USERNAME=$username" \
+        -e "PASSWORD=$user_password" \
+        -e "SVELTE_PORT=5173" \
+        -v "$DATA_DIR/$username:/home/$username" \
+        -v "$DATA_DIR/${username}_config:/etc/skel" \
+        $extra_volume_params \
+        --restart unless-stopped \
+        --cpus="$cpu_limit" \
+        --memory="$memory_limit" \
+        $other_params \
+        "$image_name"
+    
+    # Vérifier si le conteneur a bien démarré
+    if [ $? -eq 0 ]; then
+        echo "✅ Conteneur ${container_name} démarré avec succès !"
+        echo "🔄 Attente que le service soit prêt..."
+        sleep 3
+        
+        # Créer le script de test GPU uniquement si on utilise le GPU
+        if [ "$use_gpu" = "true" ]; then
+            create_gpu_test_script "$container_name" "$username"
+        fi
+    else
+        echo "❌ Échec du démarrage du conteneur ${container_name}."
+    fi
+}
+
+# Ancienne fonction maintenue pour compatibilité, appelle la nouvelle fonction
+run_container_with_gpu() {
+    run_container "$1" "$2" "$3" "$4" "$5" "$6" "true"
 }
 
 # Appeler la vérification de dépendances au démarrage
 check_dependencies
 
 # Lecture des entrées utilisateur
+echo "1: Connexion / 2: Création de compte"
 read -p "Choix (1/2) : " choice
 read -p "Nom d'utilisateur : " username
 read -s -p "Mot de passe : " password
 echo
-read -p "Image : " image_name
+read -p "Image (laisser vide pour défaut) : " image_name
 
 # Si aucune image n'est spécifiée, utiliser la valeur par défaut
 if [ -z "$image_name" ]; then
     image_name="xfce_gui_container"
+fi
+
+# Demander si l'utilisateur souhaite utiliser le GPU
+read -p "Voulez-vous utiliser le GPU? (o/n) : " use_gpu_choice
+use_gpu="false"
+if [[ "$use_gpu_choice" =~ ^[oOyY]$ ]]; then
+    use_gpu="true"
 fi
 
 if [ "$choice" == "1" ]; then
@@ -397,7 +564,6 @@ if [ "$choice" == "1" ]; then
     stored_image=$(get_user_image "$username")
     if [ -n "$stored_image" ] && [ "$stored_image" != "$image_name" ]; then
         echo "⚠️ Changement d'environnement détecté : $stored_image -> $image_name"
-        # Option: demander confirmation ici si nécessaire
         # Mise à jour de l'image associée à l'utilisateur
         set_user_image "$username" "$image_name"
     elif [ -z "$stored_image" ]; then
@@ -425,7 +591,7 @@ elif [ "$choice" == "2" ]; then
     fi
     
     set_user_port "$username" "$free_port"
-    echo "✅ Compte '$username' créé avec succès (port $free_port)"
+    echo "✅ Compte '$username' créé avec succès"
 else
     echo "❌ Choix invalide"
     exit 1
@@ -436,147 +602,52 @@ container_name="${CONTAINER_PREFIX}${username}"
 
 # Vérifier si le port est toujours disponible, sinon en attribuer un nouveau
 user_port=$(get_user_port "$username")
-container_exists_flag=0
 
 # Récupération du port RDP spécifique à l'image
 rdp_port=$(get_image_info "$image_name" "port")
 [ -z "$rdp_port" ] && rdp_port="3390"  # Valeur par défaut si non spécifiée
 
-# Récupération des ports et volumes supplémentaires
-extra_volume_params=$(parse_volumes "$image_name")
-extra_port_params=$(parse_extra_ports "$image_name")
-other_params=$(parse_other_extra_params "$image_name")
-
 if container_exists "$container_name"; then
-    container_exists_flag=1
-    # Récupérer l'image du conteneur existant
-    existing_image=$(docker inspect --format='{{.Config.Image}}' "$container_name" 2>/dev/null)
-    
-    # Vérifier si l'image a changé
-    if [ "$existing_image" != "$image_name" ]; then
-        echo "🔄 Changement d'image détecté: $existing_image -> $image_name"
-        echo "💥 Suppression du conteneur existant pour recréation avec la nouvelle image..."
-        docker rm -f "$container_name" >/dev/null
-        container_exists_flag=0
-    else
-        # Vérifier si le port assigné est toujours le même que celui utilisé par le conteneur
-        current_port=$(docker port "$container_name" "$rdp_port/tcp" 2>/dev/null | cut -d':' -f2)
-        
-        if [ -z "$current_port" ] || [ "$current_port" != "$user_port" ]; then
-            # Le port a changé ou le conteneur n'est pas en marche
-            if ! ss -tuln | grep -q ":$user_port "; then
-                # Le port est libre, on peut l'utiliser
-                echo "📝 Mise à jour du port pour le conteneur existant..."
-            else
-                # Le port n'est plus disponible, il faut en trouver un nouveau
-                echo "⚠️ Le port assigné n'est plus disponible, recherche d'un nouveau port..."
-                free_port=$(find_free_port)
-                if [ $? -ne 0 ]; then
-                    echo "❌ $free_port"
-                    exit 1
-                fi
-                user_port=$free_port
-                set_user_port "$username" "$user_port"
-                echo "📝 Nouveau port assigné: $user_port"
-            fi
-        fi
-    fi
-fi
-
-# Obtenir le mot de passe utilisateur (pour accéder au conteneur)
-user_password=$password
-
-# Récupérer les paramètres spécifiques à l'image
-cpu_limit=$(get_image_info "$image_name" "cpu")
-memory_limit=$(get_image_info "$image_name" "memory")
-
-# Démarrage du container avec port dynamique et volumes pour la persistance
-if [ $container_exists_flag -eq 1 ]; then
     if container_running "$container_name"; then
-        echo "📦 Le container est déjà en cours d'exécution"
+        run_container "$container_name" "$username" "$password" "$image_name" "$user_port" "$rdp_port" "$use_gpu"
     else
         # Vérifier si le conteneur est juste arrêté (et non supprimé)
         if docker ps -a --filter "name=$container_name" --filter "status=exited" --format "{{.Names}}" | grep -q "^$container_name$"; then
-            echo "🔄 Redémarrage du conteneur existant..."
-            docker start "$container_name" >/dev/null
+            echo "🔄 Redémarrage du conteneur..."
+            run_container "$container_name" "$username" "$password" "$image_name" "$user_port" "$rdp_port" "$use_gpu"
             
             # Mettre à jour le mot de passe si nécessaire
-            docker exec "$container_name" bash -c "echo '$username:$user_password' | chpasswd" 2>/dev/null
+            docker exec "$container_name" bash -c "echo '$username:$password' | chpasswd" 2>/dev/null
         else
-            # Recréer le conteneur s'il n'existe pas ou a été supprimé
-            echo "🔄 Recréation du conteneur..."
-            
-            # Créer le répertoire de données utilisateur s'il n'existe pas
-            mkdir -p "$DATA_DIR/$username"
-            mkdir -p "$DATA_DIR/${username}_config"
-            
-            docker run -dit \
-                --name "$container_name" \
-                -p "$user_port:$rdp_port" \
-                $extra_port_params \
-                -e "USERNAME=$username" \
-                -e "PASSWORD=$user_password" \
-                -e "SVELTE_PORT=5173" \
-                -v "$DATA_DIR/$username:/home/$username" \
-                -v "$DATA_DIR/${username}_config:/etc/skel" \
-                $extra_volume_params \
-                --restart unless-stopped \
-                --cpus="$cpu_limit" \
-                --memory="$memory_limit" \
-                $other_params \
-                "$image_name"
+            # Recréer le conteneur s'il a été supprimé
+            run_container "$container_name" "$username" "$password" "$image_name" "$user_port" "$rdp_port" "$use_gpu"
         fi
     fi
 else
-    echo "🚀 Création et démarrage du container '$container_name' sur le port $user_port avec l'image $image_name..."
-    
-    # Créer le répertoire de données utilisateur s'il n'existe pas
-    mkdir -p "$DATA_DIR/$username"
-    mkdir -p "$DATA_DIR/${username}_config"
-    
-    # Construire la commande docker run avec tous les paramètres
-    docker run -dit \
-        --name "$container_name" \
-        -p "$user_port:$rdp_port" \
-        $extra_port_params \
-        -e "USERNAME=$username" \
-        -e "PASSWORD=$user_password" \
-        -e "SVELTE_PORT=5173" \
-        -v "$DATA_DIR/$username:/home/$username" \
-        -v "$DATA_DIR/${username}_config:/etc/skel" \
-        $extra_volume_params \
-        --restart unless-stopped \
-        --cpus="$cpu_limit" \
-        --memory="$memory_limit" \
-        $other_params \
-        "$image_name"
-        
-    # Initialiser le fichier d'activité
-    sleep 2  # Attendre un peu que le conteneur démarre
-    docker exec "$container_name" bash -c "echo $(date +%s) > /home/$username/.last_activity" 2>/dev/null
+    # Création d'un nouveau conteneur
+    run_container "$container_name" "$username" "$password" "$image_name" "$user_port" "$rdp_port" "$use_gpu"
 fi
 
-# Initialiser l'optimisation des ressources
-initialize_optimization
+# Créer le script de nettoyage
+create_cleanup_script
 
 # Affiche les infos de connexion
 IP=$(hostname -I | awk '{print $1}')
-echo -e "\n🖥️  Connecte-toi avec Remmina (RDP) sur : $IP:$user_port"
-echo -e "\n USER : $username"
-echo -e "\n MOT DE PASSE : $user_password"
-echo -e "\n TYPE DE BUREAU : $(get_image_info "$image_name" "name")"  # Affiche le nom complet de l'environnement
+echo -e "\n🖥️  Connecte-toi avec RDP sur : $IP:$user_port"
+echo -e "👤 USER : $username"
+echo -e "🔑 MOT DE PASSE : $password"
 
 # Afficher les services supplémentaires si présents
-if [ -n "$extra_port_params" ]; then
-    echo -e "\n📱 Services supplémentaires disponibles :"
-    for port_mapping in $(get_image_info "$image_name" "extra_ports"); do
-        host_port=$(echo $port_mapping | cut -d':' -f1)
-        container_port=$(echo $port_mapping | cut -d':' -f2)
-        echo -e " • Service sur le port $container_port : $IP:$host_port"
-        
-        # Information spécifique pour Svelte
-        if [ "$container_port" = "5173" ]; then
-            echo -e "   📊 Application Svelte accessible sur : http://$IP:$host_port"
-        fi
-    done
+for port_mapping in $(get_image_info "$image_name" "extra_ports"); do
+    host_port=$(echo $port_mapping | cut -d':' -f1)
+    container_port=$(echo $port_mapping | cut -d':' -f2)
+    
+    if [ "$container_port" = "5173" ]; then
+        echo -e "📊 Application Web : http://$IP:$host_port"
+    fi
+done
+
+# N'afficher l'info sur le script GPU que si le GPU est activé
+if [ "$use_gpu" = "true" ]; then
+    echo -e "\n🎮 Pour tester le GPU : ./test_gpu.sh"
 fi
