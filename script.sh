@@ -70,6 +70,18 @@ get_image_info() {
 # Fonction pour chiffrer un mot de passe avec bcrypt
 encrypt_password() {
     local password=$1
+    
+    # Vérifier que bcrypt est installé
+    if ! python3 -c 'import bcrypt' 2>/dev/null; then
+        echo "Installation du module bcrypt pour Python..."
+        if ! pip3 install bcrypt 2>/dev/null && ! sudo pip3 install bcrypt 2>/dev/null; then
+            echo "Erreur: Impossible d'installer bcrypt. Utilisation d'une méthode alternative."
+            # Méthode alternative: utiliser un hash simple (moins sécurisé mais fonctionnel)
+            echo -n "$password" | md5sum | awk '{print $1}'
+            return
+        fi
+    fi
+    
     echo -n "$password" | python3 -c 'import bcrypt, sys; print(bcrypt.hashpw(sys.stdin.read().encode(), bcrypt.gensalt()).decode())'
 }
 
@@ -77,14 +89,27 @@ encrypt_password() {
 verify_password() {
     local password=$1
     local hashed_password=$2
-    python3 -c "import bcrypt, sys; sys.exit(0 if bcrypt.checkpw('$password'.encode(), '$hashed_password'.encode()) else 1)" && echo "true" || echo "false"
+    
+    # Vérifier si le hash ressemble à un hash bcrypt ou à un hash MD5 (méthode alternative)
+    if [[ "$hashed_password" =~ ^\$2[ayb]\$ ]]; then
+        # C'est un hash bcrypt
+        python3 -c "import bcrypt, sys; sys.exit(0 if bcrypt.checkpw('$password'.encode(), '$hashed_password'.encode()) else 1)" && echo "true" || echo "false"
+    else
+        # C'est probablement un hash MD5 (méthode alternative)
+        local password_hash=$(echo -n "$password" | md5sum | awk '{print $1}')
+        if [ "$password_hash" = "$hashed_password" ]; then
+            echo "true"
+        else
+            echo "false"
+        fi
+    fi
 }
 
 # Vérifie si le paquet bcrypt est installé pour Python, sinon l'installe
 check_bcrypt() {
     if ! python3 -c "import bcrypt" 2>/dev/null; then
         echo "Installation du module bcrypt pour Python..."
-        pip3 install bcrypt || sudo pip3 install bcrypt
+        pip3 install bcrypt 2>/dev/null || sudo pip3 install bcrypt 2>/dev/null || echo "Avertissement: Impossible d'installer bcrypt. La gestion des mots de passe sera moins sécurisée."
     fi
 }
 
@@ -94,6 +119,10 @@ check_dependencies() {
     if ! command -v python3 &> /dev/null; then
         echo "Python3 n'est pas installé. Installation en cours..."
         sudo apt-get update && sudo apt-get install -y python3 python3-pip
+        if [ $? -ne 0 ]; then
+            echo "Erreur: Impossible d'installer Python3. Veuillez l'installer manuellement."
+            exit 1
+        fi
     fi
     
     # Vérifie le module bcrypt
@@ -117,6 +146,12 @@ find_free_port() {
     done
     echo "Aucun port disponible entre $start_port et $end_port"
     return 1
+}
+
+# Vérifie si un port est disponible (pour les nouveaux ports uniquement)
+port_is_available() {
+    local port=$1
+    ! ss -tuln | grep -q ":$port " && ! docker ps -a --format '{{.Ports}}' | grep -q ":$port->"
 }
 
 # Vérifie si un utilisateur existe
@@ -177,8 +212,8 @@ check_container_activity() {
     local container_image=$2
     local rdp_port=$(get_image_info "$container_image" "port")
     
-    # Vérifie les connexions RDP actives
-    connections=$(docker exec "$container_name" netstat -ant | grep ":$rdp_port" | grep "ESTABLISHED" | wc -l)
+    # Vérifie les connexions RDP actives (corrigé pour supporter les ports 3389 et 3390)
+    connections=$(docker exec "$container_name" netstat -ant 2>/dev/null | grep -E ":(3389|$rdp_port)" | grep "ESTABLISHED" | wc -l)
     
     if [ "$connections" -gt 0 ]; then
         return 0  # Connexions actives
@@ -224,16 +259,8 @@ parse_extra_ports() {
             host_port=$(echo $port_mapping | cut -d':' -f1)
             container_port=$(echo $port_mapping | cut -d':' -f2)
             
-            # Vérifier si le port hôte est disponible
-            if ! ss -tuln | grep -q ":$host_port "; then
-                port_params="$port_params -p $host_port:$container_port"
-            else
-                # Si le port est occupé, essayer de trouver un port libre
-                local free_alt_port=$(find_free_port $((host_port+1)) $((host_port+100)))
-                if [ $? -eq 0 ]; then
-                    port_params="$port_params -p $free_alt_port:$container_port"
-                fi
-            fi
+            # On force l'utilisation du port spécifié
+            port_params="$port_params -p $host_port:$container_port"
         done
     fi
     
@@ -298,7 +325,7 @@ for container in $(docker ps --filter "name=$CONTAINER_PREFIX" --format "{{.Name
     username=${container#${CONTAINER_PREFIX}}
     
     # Vérifier l'activité RDP
-    connections=$(docker exec "$container" netstat -ant 2>/dev/null | grep -q ":3390" || grep -q ":3389" | grep "ESTABLISHED" | wc -l)
+    connections=$(docker exec "$container" netstat -ant 2>/dev/null | grep -E ":(3389|3390)" | grep "ESTABLISHED" | wc -l)
     
     if [ "$connections" -eq 0 ]; then
         # Créer un fichier de timestamp pour la dernière activité si nécessaire
@@ -349,6 +376,7 @@ EOL
     fi
 }
 
+
 # Créer un script de test GPU à l'intérieur du conteneur
 create_gpu_test_script() {
     local container_name=$1
@@ -360,65 +388,170 @@ create_gpu_test_script() {
     # Contenu du script
     docker exec "$container_name" bash -c "cat > $script_path << 'EOF'
 #!/bin/bash
-echo \"==== Test de détection GPU NVIDIA ====\"
+echo \"==== Test GPU avec CuPy ====\"
 echo \"Date: \$(date)\"
 echo \"Utilisateur: \$(whoami)\"
 echo \"\" 
 
-echo \"=== Vérification des périphériques NVIDIA ===\"
-ls -la /dev/nvidia* 2>/dev/null || echo \"❌ Aucun périphérique NVIDIA trouvé dans /dev/\"
-
-echo \"\"
-echo \"=== Test nvidia-smi ===\"
-nvidia-smi || echo \"❌ La commande nvidia-smi a échoué\"
-
-echo \"\"
-echo \"=== Variables d'environnement NVIDIA ===\"
-env | grep -i nvidia
-
-echo \"\"
-echo \"=== Modules du noyau ===\"
-lsmod | grep -i nvidia || echo \"❌ Aucun module noyau NVIDIA chargé\"
-
-echo \"\"
-echo \"=== Bibliothèques NVIDIA ===\"
-ldconfig -p | grep -i nvidia || echo \"❌ Aucune bibliothèque NVIDIA trouvée\"
-
-# Créer un test avec CUDA si disponible
-if command -v nvcc &> /dev/null; then
-    echo \"\"
-    echo \"=== Test CUDA ===\"
-    echo 'int main() { return 0; }' > test.cu
-    nvcc test.cu -o test_cuda && echo \"✅ Compilation CUDA réussie\" || echo \"❌ Échec de compilation CUDA\"
-    rm -f test.cu test_cuda
-fi
-
-# Si pip est disponible, essayer d'installer et tester pytorch
-if command -v pip3 &> /dev/null; then
-    echo \"\"
-    echo \"=== Test PyTorch (optionnel) ===\"
-    if ! python3 -c \"import torch\" 2>/dev/null; then
-        echo \"Installation de PyTorch...\"
-        pip3 install torch --index-url https://download.pytorch.org/whl/cpu || echo \"❌ Échec d'installation de PyTorch\"
-    fi
+# Vérifier si pip3 est disponible, sinon essayer de l'installer
+if ! command -v pip3 &> /dev/null; then
+    echo \"pip3 n'est pas installé, tentative d'installation...\"
     
-    # Test PyTorch avec CUDA
-    python3 -c \"
-import torch
-print('PyTorch version:', torch.__version__)
-print('CUDA disponible:', torch.cuda.is_available())
-if torch.cuda.is_available():
-    print('Nombre de GPUs:', torch.cuda.device_count())
-    print('Nom du GPU:', torch.cuda.get_device_name(0))
-    x = torch.rand(5, 3).cuda()
-    print('Tensor sur GPU créé avec succès')
-else:
-    print('❌ CUDA n\\'est pas disponible pour PyTorch')
-\" || echo \"❌ Échec du test PyTorch\"
+    # Détecter le gestionnaire de paquets
+    if command -v apt-get &> /dev/null; then
+        echo \"Utilisation d'apt-get pour installer pip3...\"
+        apt-get update && apt-get install -y python3-pip
+    elif command -v apk &> /dev/null; then
+        echo \"Utilisation d'apk (Alpine) pour installer pip3...\"
+        apk add --no-cache python3 py3-pip
+    elif command -v yum &> /dev/null; then
+        echo \"Utilisation de yum pour installer pip3...\"
+        yum install -y python3-pip
+    elif command -v dnf &> /dev/null; then
+        echo \"Utilisation de dnf pour installer pip3...\"
+        dnf install -y python3-pip
+    else
+        echo \"❌ Je n'ai pas pu détecter le gestionnaire de paquets. Installation manuelle requise.\"
+        echo \"Commandes possibles selon ton système:\"
+        echo \"- Debian/Ubuntu: apt-get update && apt-get install -y python3-pip\"
+        echo \"- Alpine: apk add --no-cache python3 py3-pip\"
+        echo \"- CentOS/RHEL: yum install -y python3-pip\"
+        echo \"- Fedora: dnf install -y python3-pip\"
+    fi
+fi
+
+# Vérifier à nouveau si pip3 est disponible
+if ! command -v pip3 &> /dev/null; then
+    echo \"❌ pip3 n'a pas pu être installé. Utilisation de nvidia-smi seulement.\"
+    
+    # On va quand même tester nvidia-smi
+    echo \"Test de nvidia-smi (infos basiques du GPU)\"
+    nvidia-smi
+    
+    echo \"\"
+    echo \"==== Test terminé (limité) ====\"
+    exit 1
+fi
+
+# À partir d'ici, on a pip3 disponible
+echo \"1. Test de nvidia-smi (infos basiques du GPU)\"
+nvidia-smi
+
+if [ \$? -ne 0 ]; then
+  echo \"❌ PROBLÈME: nvidia-smi ne fonctionne pas. Le GPU n'est probablement pas accessible.\"
+  exit 1
 fi
 
 echo \"\"
-echo \"==== Test terminé ===\"
+echo \"2. Test d'allocation mémoire GPU avec CuPy\"
+echo \"Je vais lancer un processus qui va occuper le GPU en continu...\"
+
+# On va créer un petit script Python qui va juste allouer de la mémoire GPU
+cat > /tmp/gpu_alloc.py << 'PYEOF'
+import os
+import time
+import sys
+
+# Vérifier si cupy est installé, sinon l'installer
+try:
+    import cupy
+except ImportError:
+    print(\"CuPy n'est pas installé, tentative d'installation...\")
+    os.system(f\"{sys.executable} -m pip install cupy-cuda11x\")
+    print(\"Installation terminée, essayons à nouveau...\")
+
+# Essaie d'allouer de la mémoire GPU
+print(\"Test d'allocation GPU...\")
+
+try:
+    # Méthode 1: Essayer avec CuPy
+    print(\"Essai avec CuPy...\")
+    import cupy as cp
+    x = cp.zeros((1000, 1000))
+    print(\"✅ CuPy fonctionne! Mémoire GPU allouée.\")
+    
+    # Boucle continue pour occuper le GPU
+    print(\"Maintenant je vais faire une boucle pour occuper le GPU...\")
+    print(\"Ctrl+C pour arrêter\")
+    try:
+        i = 0
+        while True:
+            # Faire des opérations sur le GPU
+            a = cp.random.random((2000, 2000))
+            b = cp.random.random((2000, 2000))
+            c = cp.matmul(a, b)  # Multiplication matricielle (lourde pour le GPU)
+            
+            # Forcer la synchronisation pour s'assurer que le GPU travaille
+            c.sum()
+            
+            i += 1
+            if i % 10 == 0:
+                print(f\"Itération {i} - GPU en activité...\")
+                
+            # Petite pause pour ne pas saturer le CPU
+            time.sleep(0.1)
+    except KeyboardInterrupt:
+        print(\"\\nTest arrêté manuellement.\")
+except ImportError:
+    try:
+        # Méthode 2: Essayer avec PyTorch (souvent préinstallé)
+        print(\"CuPy n'a pas pu être installé. Essai avec PyTorch...\")
+        
+        # Tenter d'installer PyTorch si pas déjà fait
+        try:
+            import torch
+        except ImportError:
+            print(\"PyTorch n'est pas installé, tentative d'installation...\")
+            os.system(f\"{sys.executable} -m pip install torch\")
+            
+            try:
+                import torch
+            except ImportError:
+                print(\"❌ Impossible d'installer PyTorch\")
+                sys.exit(1)
+        
+        if torch.cuda.is_available():
+            x = torch.zeros(1000, 1000, device='cuda')
+            print(\"✅ PyTorch fonctionne! Mémoire GPU allouée.\")
+            
+            # Boucle continue pour occuper le GPU
+            print(\"Maintenant je vais faire une boucle pour occuper le GPU...\")
+            print(\"Ctrl+C pour arrêter\")
+            try:
+                i = 0
+                while True:
+                    # Faire des opérations sur le GPU
+                    a = torch.randn(2000, 2000, device='cuda')
+                    b = torch.randn(2000, 2000, device='cuda')
+                    c = torch.matmul(a, b)  # Multiplication matricielle
+                    
+                    # Forcer la synchronisation
+                    c.sum().item()
+                    
+                    i += 1
+                    if i % 10 == 0:
+                        print(f\"Itération {i} - GPU en activité...\")
+                    
+                    # Petite pause
+                    time.sleep(0.1)
+            except KeyboardInterrupt:
+                print(\"\\nTest arrêté manuellement.\")
+        else:
+            print(\"❌ PyTorch est installé mais ne détecte pas de GPU.\")
+    except Exception as e:
+        print(f\"❌ Erreur lors du test GPU: {e}\")
+PYEOF
+
+# Essayer d'exécuter le script pour tester le GPU
+echo \"Lancement du test d'allocation mémoire GPU...\"
+python3 /tmp/gpu_alloc.py
+
+echo \"\"
+echo \"Si le test ci-dessus ne marche pas, essaie cette commande:\"
+echo \"nvidia-smi -l 1\"
+echo \"Ctrl+C pour arrêter\"
+echo \"\"
+echo \"Test GPU terminé.\"
 EOF"
     
     # Rendre le script exécutable
@@ -440,6 +573,9 @@ run_container() {
         echo "Le conteneur ${container_name} existe déjà, suppression en cours..."
         docker stop ${container_name} >/dev/null 2>&1 || true
         docker rm ${container_name} >/dev/null 2>&1 || true
+        
+        # Petite pause pour s'assurer que le système a libéré le port
+        sleep 1
     fi
     
     # Récupérer les paramètres supplémentaires
@@ -600,33 +736,36 @@ fi
 # Container associé à l'utilisateur
 container_name="${CONTAINER_PREFIX}${username}"
 
-# Vérifier si le port est toujours disponible, sinon en attribuer un nouveau
+# Récupérer le port associé à l'utilisateur
 user_port=$(get_user_port "$username")
+
+# Pour un NOUVEAU conteneur uniquement, vérifier si le port est disponible
+if ! container_exists "$container_name" && ! port_is_available "$user_port"; then
+    echo "⚠️ Le port $user_port n'est plus disponible, recherche d'un nouveau port..."
+    new_port=$(find_free_port)
+    if [ $? -eq 0 ]; then
+        set_user_port "$username" "$new_port"
+        user_port="$new_port"
+        echo "✅ Nouveau port attribué: $user_port"
+    else
+        echo "❌ $new_port"
+        exit 1
+    fi
+fi
 
 # Récupération du port RDP spécifique à l'image
 rdp_port=$(get_image_info "$image_name" "port")
 [ -z "$rdp_port" ] && rdp_port="3390"  # Valeur par défaut si non spécifiée
 
+# Message différent selon que le conteneur existe déjà ou non
 if container_exists "$container_name"; then
-    if container_running "$container_name"; then
-        run_container "$container_name" "$username" "$password" "$image_name" "$user_port" "$rdp_port" "$use_gpu"
-    else
-        # Vérifier si le conteneur est juste arrêté (et non supprimé)
-        if docker ps -a --filter "name=$container_name" --filter "status=exited" --format "{{.Names}}" | grep -q "^$container_name$"; then
-            echo "🔄 Redémarrage du conteneur..."
-            run_container "$container_name" "$username" "$password" "$image_name" "$user_port" "$rdp_port" "$use_gpu"
-            
-            # Mettre à jour le mot de passe si nécessaire
-            docker exec "$container_name" bash -c "echo '$username:$password' | chpasswd" 2>/dev/null
-        else
-            # Recréer le conteneur s'il a été supprimé
-            run_container "$container_name" "$username" "$password" "$image_name" "$user_port" "$rdp_port" "$use_gpu"
-        fi
-    fi
+    echo "🔄 Conteneur existant, redémarrage pour appliquer les changements..."
 else
-    # Création d'un nouveau conteneur
-    run_container "$container_name" "$username" "$password" "$image_name" "$user_port" "$rdp_port" "$use_gpu"
+    echo "🆕 Création d'un nouveau conteneur..."
 fi
+
+# Lancer ou redémarrer le conteneur (toujours avec la même méthode)
+run_container "$container_name" "$username" "$password" "$image_name" "$user_port" "$rdp_port" "$use_gpu"
 
 # Créer le script de nettoyage
 create_cleanup_script
@@ -649,5 +788,5 @@ done
 
 # N'afficher l'info sur le script GPU que si le GPU est activé
 if [ "$use_gpu" = "true" ]; then
-    echo -e "\n🎮 Pour tester le GPU : ./test_gpu.sh"
+    echo -e "\n🎮 Pour tester le GPU : sudo ./test_gpu.sh"
 fi

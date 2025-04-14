@@ -62,23 +62,54 @@ def get_gpu_info():
 def get_container_gpu_usage(container_id):
     """Récupère l'utilisation GPU d'un conteneur spécifique"""
     try:
-        # Vérifier si nvidia-smi peut voir des processus dans le conteneur
+        # Méthode 1: Utiliser nvidia-smi dans le conteneur
         cmd = f"docker exec {container_id} nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader,nounits"
         output = subprocess.check_output(cmd, shell=True, stderr=subprocess.DEVNULL).decode().strip()
         
-        if not output:
-            return "0%", "0MB"
+        if output:
+            # Calculer l'utilisation totale
+            total_memory = 0
+            for line in output.split('\n'):
+                if line.strip():
+                    parts = line.split(', ')
+                    if len(parts) >= 2:
+                        total_memory += int(parts[1])
+            
+            return "Active", f"{total_memory}MB"
         
-        # Calculer l'utilisation totale
+        # Méthode 2: Vérifier les PID du conteneur dans nvidia-smi
+        # Récupérer tous les PIDs du conteneur
+        cmd = f"docker top {container_id} -eo pid | tail -n +2"
+        container_pids = subprocess.check_output(cmd, shell=True).decode().strip().split('\n')
+        
+        # Récupérer tous les processus GPU
+        cmd = "nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader,nounits"
+        gpu_processes = subprocess.check_output(cmd, shell=True).decode().strip().split('\n')
+        
+        # Vérifier si un PID du conteneur utilise le GPU
         total_memory = 0
-        for line in output.split('\n'):
-            if line.strip():
-                parts = line.split(', ')
-                if len(parts) >= 2:
+        for gpu_proc in gpu_processes:
+            if not gpu_proc.strip():
+                continue
+                
+            parts = gpu_proc.split(', ')
+            if len(parts) >= 2:
+                pid = parts[0].strip()
+                if pid in container_pids:
                     total_memory += int(parts[1])
         
-        return "N/A", f"{total_memory}MB"
-    except:
+        if total_memory > 0:
+            return "Active", f"{total_memory}MB"
+        
+        # Méthode 3: Vérifier si les ressources GPU sont allouées mais pas utilisées
+        # Cette partie est un peu plus complexe à implémenter, mais tu pourrais utiliser nvidia-smi -q
+        # pour obtenir des informations détaillées sur l'allocation de mémoire par GPU
+        
+        # Si on arrive ici, le GPU est accessible mais pas utilisé activement
+        return "Idle", "0MB"
+            
+    except Exception as e:
+        # print(f"Erreur dans get_container_gpu_usage: {e}")  # Pour debug
         return "N/A", "N/A"
 
 def get_containers_info(filter_prefix="gui_user_"):
@@ -227,7 +258,10 @@ def display_containers(containers):
         # Formatage de l'info GPU
         if container['has_gpu']:
             if container['is_running']:
-                gpu_info = f"{Colors.CYAN}✓{Colors.END} {container['gpu_mem']}"
+                if container['gpu_mem'] == "0MB":
+                    gpu_info = f"{Colors.CYAN}✓{Colors.END} {Colors.YELLOW}Idle{Colors.END}"
+                else:
+                    gpu_info = f"{Colors.CYAN}✓{Colors.END} {container['gpu_mem']}"
             else:
                 gpu_info = f"{Colors.CYAN}✓{Colors.END} inactif"
         else:
@@ -384,7 +418,6 @@ def remove_container(container_id):
         print(f"{Colors.YELLOW}Suppression annulée.{Colors.END}")
 
 def test_gpu(container_id):
-    """Lance un test de GPU simple dans le conteneur (sans PyTorch)"""
     try:
         term_width = get_terminal_width()
         separator = "+" + "-" * (term_width - 2) + "+"
