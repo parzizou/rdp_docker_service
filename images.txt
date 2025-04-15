@@ -2,4 +2,4 @@
 xfce_gui_container:Bureau XFCE (Léger):3390:1:2g::
 lxqt_container:Bureau LXQT (Moderne et léger):3390:1:2g::
 dev_svelte_container:Environnement Dev Svelte & Bun:3390:2:4g:-p 5173:5173:/dev:/dev,/mnt:/mnt,/media
-test_gpu_simple:Test GPU:3390:1:2g::
+

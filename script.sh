@@ -4,6 +4,7 @@ CONTAINER_PREFIX="gui_user_"
 USER_FILE="users.txt"
 PORT_FILE="port_map.txt"
 IMAGE_FILE="images.txt"
+RESOURCE_FILE="resources.txt"  # Fichier pour stocker les limitations de ressources
 START_PORT=3390
 MAX_PORT=3490
 DATA_DIR="./user_data"
@@ -13,7 +14,7 @@ CLEANUP_SCRIPT="./cleanup_inactive.sh"
 # Créer les répertoires et fichiers nécessaires
 mkdir -p "$DATA_DIR"
 mkdir -p data
-touch "$USER_FILE" "$PORT_FILE"
+touch "$USER_FILE" "$PORT_FILE" "$RESOURCE_FILE"
 
 # Fonction pour obtenir les informations de l'image depuis le fichier de configuration
 get_image_info() {
@@ -73,9 +74,7 @@ encrypt_password() {
     
     # Vérifier que bcrypt est installé
     if ! python3 -c 'import bcrypt' 2>/dev/null; then
-        echo "Installation du module bcrypt pour Python..."
         if ! pip3 install bcrypt 2>/dev/null && ! sudo pip3 install bcrypt 2>/dev/null; then
-            echo "Erreur: Impossible d'installer bcrypt. Utilisation d'une méthode alternative."
             # Méthode alternative: utiliser un hash simple (moins sécurisé mais fonctionnel)
             echo -n "$password" | md5sum | awk '{print $1}'
             return
@@ -108,8 +107,7 @@ verify_password() {
 # Vérifie si le paquet bcrypt est installé pour Python, sinon l'installe
 check_bcrypt() {
     if ! python3 -c "import bcrypt" 2>/dev/null; then
-        echo "Installation du module bcrypt pour Python..."
-        pip3 install bcrypt 2>/dev/null || sudo pip3 install bcrypt 2>/dev/null || echo "Avertissement: Impossible d'installer bcrypt. La gestion des mots de passe sera moins sécurisée."
+        pip3 install bcrypt 2>/dev/null || sudo pip3 install bcrypt 2>/dev/null || :
     fi
 }
 
@@ -117,10 +115,8 @@ check_bcrypt() {
 check_dependencies() {
     # Vérifie si Python est installé
     if ! command -v python3 &> /dev/null; then
-        echo "Python3 n'est pas installé. Installation en cours..."
-        sudo apt-get update && sudo apt-get install -y python3 python3-pip
+        sudo apt-get update && sudo apt-get install -y python3 python3-pip >/dev/null 2>&1
         if [ $? -ne 0 ]; then
-            echo "Erreur: Impossible d'installer Python3. Veuillez l'installer manuellement."
             exit 1
         fi
     fi
@@ -196,6 +192,45 @@ set_user_image() {
     fi
 }
 
+# Nouvelles fonctions pour gérer les ressources utilisateur
+# Enregistre ou met à jour les ressources d'un utilisateur
+set_user_resources() {
+    local username=$1
+    local cpu_limit=$2
+    local mem_limit=$3
+    local gpu_limit=$4
+    
+    # Supprime l'ancienne entrée si elle existe
+    sed -i "/^$username:/d" "$RESOURCE_FILE"
+    
+    # Ajoute la nouvelle entrée avec les limites de ressources
+    echo "$username:$cpu_limit:$mem_limit:$gpu_limit" >> "$RESOURCE_FILE"
+}
+
+# Récupère les ressources d'un utilisateur
+get_user_resources() {
+    local username=$1
+    local resource_type=$2  # cpu, memory, gpu
+    
+    local resource_line=$(grep "^$username:" "$RESOURCE_FILE")
+    if [ -n "$resource_line" ]; then
+        case "$resource_type" in
+            "cpu") echo "$resource_line" | cut -d':' -f2 ;;
+            "memory") echo "$resource_line" | cut -d':' -f3 ;;
+            "gpu") echo "$resource_line" | cut -d':' -f4 ;;
+            *) echo "" ;;
+        esac
+    else
+        # Valeurs par défaut
+        case "$resource_type" in
+            "cpu") echo "1" ;;
+            "memory") echo "2g" ;;
+            "gpu") echo "0" ;;
+            *) echo "" ;;
+        esac
+    fi
+}
+
 # Vérifie si un conteneur existe et est en cours d'exécution
 container_running() {
     docker ps --format '{{.Names}}' | grep -q "^$1$"
@@ -204,32 +239,6 @@ container_running() {
 # Vérifie si un conteneur existe
 container_exists() {
     docker ps -a --format '{{.Names}}' | grep -q "^$1$"
-}
-
-# Vérifie l'activité du conteneur via les connexions RDP
-check_container_activity() {
-    local container_name=$1
-    local container_image=$2
-    local rdp_port=$(get_image_info "$container_image" "port")
-    
-    # Vérifie les connexions RDP actives (corrigé pour supporter les ports 3389 et 3390)
-    connections=$(docker exec "$container_name" netstat -ant 2>/dev/null | grep -E ":(3389|$rdp_port)" | grep "ESTABLISHED" | wc -l)
-    
-    if [ "$connections" -gt 0 ]; then
-        return 0  # Connexions actives
-    else
-        # Vérifie depuis quand le conteneur n'a pas eu de connexion
-        last_activity=$(docker inspect --format='{{.State.StartedAt}}' "$container_name")
-        last_timestamp=$(date -d "$last_activity" +%s)
-        current_timestamp=$(date +%s)
-        inactive_time=$((current_timestamp - last_timestamp))
-        
-        if [ "$inactive_time" -gt "$INACTIVE_TIMEOUT" ]; then
-            return 1  # Inactif depuis trop longtemps
-        else
-            return 0  # Pas encore assez inactif pour agir
-        fi
-    fi
 }
 
 # Parse les volumes supplémentaires définis dans le fichier images.txt
@@ -279,33 +288,6 @@ parse_other_extra_params() {
     fi
     
     echo "$other_params"
-}
-
-# Fonction pour vérifier quels périphériques NVIDIA sont disponibles
-check_nvidia_devices() {
-    local devices=""
-    
-    # Vérification de la présence des périphériques NVIDIA standard
-    if [ -e "/dev/nvidia0" ]; then
-        devices="$devices --device /dev/nvidia0:/dev/nvidia0"
-    fi
-    
-    if [ -e "/dev/nvidiactl" ]; then
-        devices="$devices --device /dev/nvidiactl:/dev/nvidiactl"
-    fi
-    
-    if [ -e "/dev/nvidia-uvm" ]; then
-        devices="$devices --device /dev/nvidia-uvm:/dev/nvidia-uvm"
-    fi
-    
-    # Vérification des périphériques supplémentaires (nvidia1, nvidia2, etc.)
-    for i in {1..9}; do
-        if [ -e "/dev/nvidia$i" ]; then
-            devices="$devices --device /dev/nvidia$i:/dev/nvidia$i"
-        fi
-    done
-    
-    echo "$devices"
 }
 
 # Création du script de nettoyage périodique
@@ -375,7 +357,6 @@ EOL
     (crontab -l 2>/dev/null || echo "") | { cat; echo "0 * * * * $PWD/$CLEANUP_SCRIPT >> $PWD/cleanup.log 2>&1"; } | crontab -
     fi
 }
-
 
 # Créer un script de test GPU à l'intérieur du conteneur
 create_gpu_test_script() {
@@ -558,6 +539,27 @@ EOF"
     docker exec "$container_name" bash -c "chmod +x $script_path && chown $username:$username $script_path"
 }
 
+# Fonction pour nettoyer les fichiers de configuration
+clean_config_files() {
+    local username=$1
+    local config_dir="$DATA_DIR/${username}_config"
+    local user_dir="$DATA_DIR/${username}"
+    
+    # Créer le répertoire de configuration s'il n'existe pas
+    mkdir -p "$config_dir"
+    mkdir -p "$user_dir"
+    
+    # Supprimer les fichiers de configuration qui pourraient causer des problèmes
+    rm -f "$user_dir/.ICEauthority" 2>/dev/null
+    rm -f "$user_dir/.Xauthority" 2>/dev/null
+    rm -rf "$user_dir/.cache/sessions" 2>/dev/null
+    rm -rf "$user_dir/.config/xfce4-session" 2>/dev/null
+    rm -f "$user_dir/.config/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml" 2>/dev/null
+    
+    # Supprimer également d'autres fichiers qui pourraient causer des conflits
+    rm -f "$user_dir/.config/autostart/xfce4-session-logout.desktop" 2>/dev/null
+}
+
 # Fonction pour lancer un conteneur avec ou sans GPU
 run_container() {
     local container_name=$1
@@ -566,11 +568,13 @@ run_container() {
     local image_name=$4
     local user_port=$5
     local rdp_port=$6
-    local use_gpu=$7  # Nouveau paramètre pour spécifier si on utilise le GPU
+    local use_gpu=$7
+    local cpu_limit=$8
+    local memory_limit=$9
+    local gpu_memory_limit=${10}
     
     # Vérifier si le conteneur existe déjà et le supprimer si c'est le cas
     if container_exists "$container_name"; then
-        echo "Le conteneur ${container_name} existe déjà, suppression en cours..."
         docker stop ${container_name} >/dev/null 2>&1 || true
         docker rm ${container_name} >/dev/null 2>&1 || true
         
@@ -578,28 +582,36 @@ run_container() {
         sleep 1
     fi
     
+    # Nettoyer les fichiers de configuration problématiques
+    clean_config_files "$username"
+    
     # Récupérer les paramètres supplémentaires
     local extra_port_params=$(parse_extra_ports "$image_name")
     local extra_volume_params=$(parse_volumes "$image_name")
     local other_params=$(parse_other_extra_params "$image_name")
-    local cpu_limit=$(get_image_info "$image_name" "cpu")
-    local memory_limit=$(get_image_info "$image_name" "memory")
+    
+    # On utilise les limites spécifiées par l'utilisateur
+    if [ -z "$cpu_limit" ]; then
+        cpu_limit=$(get_image_info "$image_name" "cpu")
+    fi
+    if [ -z "$memory_limit" ]; then
+        memory_limit=$(get_image_info "$image_name" "memory")
+    fi
     
     # Créer le répertoire de données utilisateur s'il n'existe pas
     mkdir -p "$DATA_DIR/$username"
     mkdir -p "$DATA_DIR/${username}_config"
     
-    # Message différent selon si on utilise le GPU ou non
-    if [ "$use_gpu" = "true" ]; then
-        echo "Lancement d'un nouveau conteneur ${container_name} avec GPU..."
-    else
-        echo "Lancement d'un nouveau conteneur ${container_name} sans GPU..."
-    fi
-    
     # Construire la commande docker différemment selon si on utilise le GPU ou non
     local gpu_params=""
     if [ "$use_gpu" = "true" ]; then
         gpu_params="--gpus all -e NVIDIA_VISIBLE_DEVICES=all -e NVIDIA_DRIVER_CAPABILITIES=all,compute,utility,graphics"
+        
+        # Si une limite de mémoire GPU est spécifiée
+        if [ -n "$gpu_memory_limit" ] && [ "$gpu_memory_limit" -gt 0 ]; then
+            # Limiter la mémoire GPU (en MiB)
+            gpu_params="$gpu_params -e NVIDIA_MEM_LIMIT=$gpu_memory_limit"
+        fi
         
         # Ajouter les périphériques NVIDIA
         if [ -e "/dev/nvidia0" ]; then
@@ -621,7 +633,7 @@ run_container() {
         fi
     fi
     
-    # Lancer le conteneur avec ou sans GPU
+    # Lancer ou redémarrer le conteneur (toujours avec la même méthode)
     docker run -dit \
         --name "$container_name" \
         $gpu_params \
@@ -637,37 +649,40 @@ run_container() {
         --cpus="$cpu_limit" \
         --memory="$memory_limit" \
         $other_params \
-        "$image_name"
+        "$image_name" >/dev/null 2>&1
     
     # Vérifier si le conteneur a bien démarré
     if [ $? -eq 0 ]; then
-        echo "✅ Conteneur ${container_name} démarré avec succès !"
-        echo "🔄 Attente que le service soit prêt..."
+        # Attente que le service soit prêt
         sleep 3
+        
+        # Assurer que le fichier locale existe pour éviter les erreurs pam
+        docker exec "$container_name" bash -c "mkdir -p /etc/default && touch /etc/default/locale" >/dev/null 2>&1
+        
+        # Sauvegarder les limites de ressources de l'utilisateur
+        set_user_resources "$username" "$cpu_limit" "$memory_limit" "$gpu_memory_limit"
         
         # Créer le script de test GPU uniquement si on utilise le GPU
         if [ "$use_gpu" = "true" ]; then
-            create_gpu_test_script "$container_name" "$username"
+            create_gpu_test_script "$container_name" "$username" >/dev/null 2>&1
         fi
+        
+        # Le conteneur a bien démarré, on renvoie 0
+        return 0
     else
-        echo "❌ Échec du démarrage du conteneur ${container_name}."
+        # Le conteneur n'a pas démarré, on renvoie 1
+        return 1
     fi
 }
 
-# Ancienne fonction maintenue pour compatibilité, appelle la nouvelle fonction
-run_container_with_gpu() {
-    run_container "$1" "$2" "$3" "$4" "$5" "$6" "true"
-}
-
 # Appeler la vérification de dépendances au démarrage
-check_dependencies
+check_dependencies >/dev/null 2>&1
 
-# Lecture des entrées utilisateur
-echo "1: Connexion / 2: Création de compte"
+# Menu principal
 read -p "Choix (1/2) : " choice
 read -p "Nom d'utilisateur : " username
 read -s -p "Mot de passe : " password
-echo
+echo ""  # Saut de ligne après la saisie du mot de passe
 read -p "Image (laisser vide pour défaut) : " image_name
 
 # Si aucune image n'est spécifiée, utiliser la valeur par défaut
@@ -675,12 +690,31 @@ if [ -z "$image_name" ]; then
     image_name="xfce_gui_container"
 fi
 
-# Demander si l'utilisateur souhaite utiliser le GPU
+# Demander les limites de ressources
+read -p "Limite CPU (cores, défaut: 1) : " cpu_limit
+read -p "Limite mémoire (ex: 2g, 512m, défaut: 2g) : " memory_limit
 read -p "Voulez-vous utiliser le GPU? (o/n) : " use_gpu_choice
+
 use_gpu="false"
+gpu_memory_limit=""
+
 if [[ "$use_gpu_choice" =~ ^[oOyY]$ ]]; then
     use_gpu="true"
+    if command -v nvidia-smi &> /dev/null; then
+        read -p "Limite mémoire GPU en MiB (laissez vide pour aucune limite) : " gpu_memory_limit
+        
+        # Vérifier si la valeur entrée est un nombre
+        if [ -n "$gpu_memory_limit" ] && ! [[ "$gpu_memory_limit" =~ ^[0-9]+$ ]]; then
+            gpu_memory_limit=""
+        fi
+    else
+        use_gpu="false"
+    fi
 fi
+
+# Utiliser des valeurs par défaut si rien n'est spécifié
+[ -z "$cpu_limit" ] && cpu_limit="1"
+[ -z "$memory_limit" ] && memory_limit="2g"
 
 if [ "$choice" == "1" ]; then
     if ! user_exists "$username"; then
@@ -698,9 +732,24 @@ if [ "$choice" == "1" ]; then
     
     # Récupérer l'image associée à l'utilisateur
     stored_image=$(get_user_image "$username")
+    
+    # Vérifier si l'image a changé - APPROCHE RADICALE
     if [ -n "$stored_image" ] && [ "$stored_image" != "$image_name" ]; then
-        echo "⚠️ Changement d'environnement détecté : $stored_image -> $image_name"
-        # Mise à jour de l'image associée à l'utilisateur
+        # Arrêter et supprimer le conteneur existant
+        if container_exists "${CONTAINER_PREFIX}${username}"; then
+            docker stop "${CONTAINER_PREFIX}${username}" >/dev/null 2>&1 || true
+            docker rm "${CONTAINER_PREFIX}${username}" >/dev/null 2>&1 || true
+        fi
+        
+        # Supprimer complètement le répertoire de l'utilisateur
+        rm -rf "$DATA_DIR/$username" 2>/dev/null
+        rm -rf "$DATA_DIR/${username}_config" 2>/dev/null
+        
+        # Recréer les répertoires vides
+        mkdir -p "$DATA_DIR/$username"
+        mkdir -p "$DATA_DIR/${username}_config"
+        
+        # Mettre à jour l'image dans la base de données
         set_user_image "$username" "$image_name"
     elif [ -z "$stored_image" ]; then
         # Si l'utilisateur n'a pas d'image associée, l'enregistrer
@@ -741,12 +790,10 @@ user_port=$(get_user_port "$username")
 
 # Pour un NOUVEAU conteneur uniquement, vérifier si le port est disponible
 if ! container_exists "$container_name" && ! port_is_available "$user_port"; then
-    echo "⚠️ Le port $user_port n'est plus disponible, recherche d'un nouveau port..."
     new_port=$(find_free_port)
     if [ $? -eq 0 ]; then
         set_user_port "$username" "$new_port"
         user_port="$new_port"
-        echo "✅ Nouveau port attribué: $user_port"
     else
         echo "❌ $new_port"
         exit 1
@@ -757,36 +804,45 @@ fi
 rdp_port=$(get_image_info "$image_name" "port")
 [ -z "$rdp_port" ] && rdp_port="3390"  # Valeur par défaut si non spécifiée
 
-# Message différent selon que le conteneur existe déjà ou non
-if container_exists "$container_name"; then
-    echo "🔄 Conteneur existant, redémarrage pour appliquer les changements..."
-else
-    echo "🆕 Création d'un nouveau conteneur..."
-fi
+# Lancer ou redémarrer le conteneur avec les nouvelles limites de ressources
+if run_container "$container_name" "$username" "$password" "$image_name" "$user_port" "$rdp_port" "$use_gpu" "$cpu_limit" "$memory_limit" "$gpu_memory_limit"; then
+    # Créer le script de nettoyage
+    create_cleanup_script >/dev/null 2>&1
 
-# Lancer ou redémarrer le conteneur (toujours avec la même méthode)
-run_container "$container_name" "$username" "$password" "$image_name" "$user_port" "$rdp_port" "$use_gpu"
+    # Affiche les infos de connexion
+    IP=$(hostname -I | awk '{print $1}')
+    echo -e "\n🖥️  Connecte-toi avec RDP sur : $IP:$user_port"
+    echo -e "👤 USER : $username"
+    echo -e "🔑 MOT DE PASSE : $password"
 
-# Créer le script de nettoyage
-create_cleanup_script
-
-# Affiche les infos de connexion
-IP=$(hostname -I | awk '{print $1}')
-echo -e "\n🖥️  Connecte-toi avec RDP sur : $IP:$user_port"
-echo -e "👤 USER : $username"
-echo -e "🔑 MOT DE PASSE : $password"
-
-# Afficher les services supplémentaires si présents
-for port_mapping in $(get_image_info "$image_name" "extra_ports"); do
-    host_port=$(echo $port_mapping | cut -d':' -f1)
-    container_port=$(echo $port_mapping | cut -d':' -f2)
-    
-    if [ "$container_port" = "5173" ]; then
-        echo -e "📊 Application Web : http://$IP:$host_port"
+    # Afficher les ressources attribuées
+    echo -e "\n📊 Ressources attribuées:"
+    echo -e "CPU: $cpu_limit cœurs"
+    echo -e "Mémoire: $memory_limit"
+    if [ "$use_gpu" = "true" ]; then
+        if [ -n "$gpu_memory_limit" ]; then
+            echo -e "GPU: Activé avec limite de mémoire de $gpu_memory_limit MiB"
+        else
+            echo -e "GPU: Activé (sans limite de mémoire)"
+        fi
+    else
+        echo -e "GPU: Désactivé"
     fi
-done
 
-# N'afficher l'info sur le script GPU que si le GPU est activé
-if [ "$use_gpu" = "true" ]; then
-    echo -e "\n🎮 Pour tester le GPU : sudo ./test_gpu.sh"
+    # Afficher les services supplémentaires si présents
+    for port_mapping in $(get_image_info "$image_name" "extra_ports"); do
+        host_port=$(echo $port_mapping | cut -d':' -f1)
+        container_port=$(echo $port_mapping | cut -d':' -f2)
+        
+        if [ "$container_port" = "5173" ]; then
+            echo -e "📊 Application Web : http://$IP:$host_port"
+        fi
+    done
+
+    # N'afficher l'info sur le script GPU que si le GPU est activé
+    if [ "$use_gpu" = "true" ]; then
+        echo -e "\n🎮 Pour tester le GPU : sudo ./test_gpu.sh"
+    fi
+else
+    echo "❌ Échec du démarrage du conteneur. Vérifie les paramètres et réessaie."
 fi

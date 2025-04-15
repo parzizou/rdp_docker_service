@@ -62,55 +62,32 @@ def get_gpu_info():
 def get_container_gpu_usage(container_id):
     """Récupère l'utilisation GPU d'un conteneur spécifique"""
     try:
-        # Méthode 1: Utiliser nvidia-smi dans le conteneur
-        cmd = f"docker exec {container_id} nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader,nounits"
-        output = subprocess.check_output(cmd, shell=True, stderr=subprocess.DEVNULL).decode().strip()
-        
-        if output:
-            # Calculer l'utilisation totale
-            total_memory = 0
-            for line in output.split('\n'):
-                if line.strip():
-                    parts = line.split(', ')
-                    if len(parts) >= 2:
-                        total_memory += int(parts[1])
-            
-            return "Active", f"{total_memory}MB"
-        
-        # Méthode 2: Vérifier les PID du conteneur dans nvidia-smi
-        # Récupérer tous les PIDs du conteneur
+        # On récupère les PIDs du conteneur
         cmd = f"docker top {container_id} -eo pid | tail -n +2"
-        container_pids = subprocess.check_output(cmd, shell=True).decode().strip().split('\n')
+        container_pids_raw = subprocess.check_output(cmd, shell=True, timeout=2).decode().strip()
+        container_pids = set(pid.strip() for pid in container_pids_raw.split('\n') if pid.strip())
         
-        # Récupérer tous les processus GPU
+        # On récupère les processus GPU
         cmd = "nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader,nounits"
-        gpu_processes = subprocess.check_output(cmd, shell=True).decode().strip().split('\n')
+        gpu_processes_raw = subprocess.check_output(cmd, shell=True, timeout=2).decode().strip()
         
-        # Vérifier si un PID du conteneur utilise le GPU
+        # On cherche les processus GPU qui appartiennent au conteneur
         total_memory = 0
-        for gpu_proc in gpu_processes:
-            if not gpu_proc.strip():
+        for line in gpu_processes_raw.split('\n'):
+            if not line.strip():
                 continue
                 
-            parts = gpu_proc.split(', ')
+            parts = line.split(', ')
             if len(parts) >= 2:
-                pid = parts[0].strip()
-                if pid in container_pids:
+                gpu_pid = parts[0].strip()
+                if gpu_pid in container_pids:
                     total_memory += int(parts[1])
         
-        if total_memory > 0:
-            return "Active", f"{total_memory}MB"
+        return total_memory
         
-        # Méthode 3: Vérifier si les ressources GPU sont allouées mais pas utilisées
-        # Cette partie est un peu plus complexe à implémenter, mais tu pourrais utiliser nvidia-smi -q
-        # pour obtenir des informations détaillées sur l'allocation de mémoire par GPU
-        
-        # Si on arrive ici, le GPU est accessible mais pas utilisé activement
-        return "Idle", "0MB"
-            
     except Exception as e:
-        # print(f"Erreur dans get_container_gpu_usage: {e}")  # Pour debug
-        return "N/A", "N/A"
+        # print(f"Debug - Erreur dans get_container_gpu_usage: {e}")
+        return 0
 
 def get_containers_info(filter_prefix="gui_user_"):
     """Récupère les informations sur les conteneurs Docker correspondant au préfixe"""
@@ -173,8 +150,7 @@ def get_containers_info(filter_prefix="gui_user_"):
         
         # Vérifier si le GPU est activé dans le conteneur
         has_gpu = False
-        gpu_util = "N/A"
-        gpu_mem = "N/A"
+        gpu_memory = 0
 
         try:
             # Vérifier les options de GPU dans le conteneur
@@ -183,9 +159,9 @@ def get_containers_info(filter_prefix="gui_user_"):
                     if device.get('Driver') == 'nvidia' or device.get('Count') == -1:  # -1 signifie "all GPUs"
                         has_gpu = True
             
-            # Si le GPU est disponible et le conteneur est en cours d'exécution, obtenir l'utilisation
-            if gpu_available and is_running and has_gpu:
-                gpu_util, gpu_mem = get_container_gpu_usage(container_id)
+            # Si le conteneur est en cours d'exécution et a le GPU, on calcule l'utilisation
+            if is_running and has_gpu:
+                gpu_memory = get_container_gpu_usage(container_id)
         except Exception as e:
             pass
         
@@ -203,8 +179,7 @@ def get_containers_info(filter_prefix="gui_user_"):
             'rdp_port': rdp_port,
             'is_running': is_running,
             'has_gpu': has_gpu,
-            'gpu_util': gpu_util,
-            'gpu_mem': gpu_mem
+            'gpu_memory': gpu_memory
         })
     
     # Trier les conteneurs par statut (En cours d'abord) puis par nom
@@ -229,12 +204,12 @@ def display_containers(containers):
     
     # En-têtes de colonne
     headers = [
-        "ID", "Utilisateur", "Status", "CPU", "Mémoire", "GPU", "Uptime", "Port", "Image"
+        "ID", "Utilisateur", "Status", "CPU", "Mémoire", "GPU (MiB)", "Uptime", "Port", "Image"
     ]
     
     # Calculer la largeur de chaque colonne en fonction de la largeur du terminal
     total_fixed_width = 25  # Espace pour les séparateurs et la marge
-    widths = [12, 15, 8, 8, 20, 12, 12, 7]
+    widths = [12, 15, 8, 8, 20, 10, 12, 7]
     
     # La colonne Image prend l'espace restant
     image_width = max(15, term_width - sum(widths) - total_fixed_width)
@@ -255,17 +230,25 @@ def display_containers(containers):
         cpu_color = Colors.RED if container['is_running'] and float(container['cpu'].replace('%', '') or 0) > 80 else Colors.END
         mem_color = Colors.RED if container['is_running'] and float(container['mem_perc'].replace('%', '') or 0) > 80 else Colors.END
         
-        # Formatage de l'info GPU
+        # Formatage de l'info GPU avec l'utilisation en MiB - correction de l'alignement
+        gpu_info = ""
         if container['has_gpu']:
             if container['is_running']:
-                if container['gpu_mem'] == "0MB":
-                    gpu_info = f"{Colors.CYAN}✓{Colors.END} {Colors.YELLOW}Idle{Colors.END}"
+                if container['gpu_memory'] > 0:
+                    gpu_info = f"{container['gpu_memory']}"
+                    # Ajouter un padding pour l'alignement
+                    gpu_value = f" {Colors.CYAN}{gpu_info}{Colors.END}"
+                    # Calculer la largeur visible (sans les codes de couleur)
+                    visible_width = len(gpu_info)
+                    # Ajouter des espaces pour compléter à la largeur souhaitée
+                    padding = widths[5] - visible_width
+                    gpu_info = f" {Colors.CYAN}{gpu_info}{Colors.END}{' ' * padding} "
                 else:
-                    gpu_info = f"{Colors.CYAN}✓{Colors.END} {container['gpu_mem']}"
+                    gpu_info = f" {Colors.YELLOW}0{Colors.END}{' ' * (widths[5] - 1)} "
             else:
-                gpu_info = f"{Colors.CYAN}✓{Colors.END} inactif"
+                gpu_info = f" {Colors.CYAN}✓{Colors.END} inactif{' ' * (widths[5] - 9)} "
         else:
-            gpu_info = "✗"
+            gpu_info = f" ✗{' ' * (widths[5] - 1)} "
         
         # Tronquer les valeurs trop longues
         username = truncate_text(container['username'], widths[1])
@@ -278,13 +261,21 @@ def display_containers(containers):
             f" {status_color}{container['status']:{widths[2]}}{Colors.END} ",
             f" {cpu_color}{container['cpu']:{widths[3]}}{Colors.END} ",
             f" {mem_color}{container['mem']:{widths[4]}}{Colors.END} ",
-            f" {gpu_info:{widths[5]}} ",
+            gpu_info,
             f" {container['uptime']:{widths[6]}} ",
             f" {container['rdp_port']:{widths[7]}} ",
             f" {image:{widths[8]}} "
         ]
         
-        print(f"|{'|'.join(cells)}|")
+        # Ici on ne fait pas de join, mais on concatène manuellement pour préserver l'alignement
+        row = "|"
+        for i, cell in enumerate(cells):
+            if i == 5:  # La cellule GPU
+                row += cell + "|"
+            else:
+                row += cell + "|"
+        
+        print(row)
     
     # Ligne de séparation finale
     print(separator)
