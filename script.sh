@@ -5,6 +5,7 @@ USER_FILE="users.txt"
 PORT_FILE="port_map.txt"
 IMAGE_FILE="images.txt"
 RESOURCE_FILE="resources.txt"  # Fichier pour stocker les limitations de ressources
+POWER_USERS_FILE="power_users.txt"  # Nouveau fichier pour les power users
 START_PORT=3390
 MAX_PORT=3490
 DATA_DIR="./user_data"
@@ -15,6 +16,11 @@ CLEANUP_SCRIPT="./cleanup_inactive.sh"
 mkdir -p "$DATA_DIR"
 mkdir -p data
 touch "$USER_FILE" "$PORT_FILE" "$RESOURCE_FILE"
+
+# Créer le fichier power_users.txt s'il n'existe pas
+if [ ! -f "$POWER_USERS_FILE" ]; then
+    echo "# Format: username:cpu_limit:memory_limit:gpu_memory_limit" > "$POWER_USERS_FILE"
+fi
 
 # Fonction pour obtenir les informations de l'image depuis le fichier de configuration
 get_image_info() {
@@ -229,6 +235,55 @@ get_user_resources() {
             *) echo "" ;;
         esac
     fi
+}
+
+# Vérifie si un utilisateur est un power user
+is_power_user() {
+    local username=$1
+    
+    if [ -f "$POWER_USERS_FILE" ]; then
+        grep -q "^$username:" "$POWER_USERS_FILE"
+        return $?
+    fi
+    return 1  # Par défaut, l'utilisateur n'est pas un power user
+}
+
+# Vérifie si un utilisateur est bloqué
+is_blocked_user() {
+    local username=$1
+    
+    if [ -f "blocked_users.txt" ]; then
+        grep -q "^$username$" "blocked_users.txt"
+        return $?
+    fi
+    return 1  # Par défaut, l'utilisateur n'est pas bloqué
+}
+
+# Récupère les limites de ressources pour un power user
+get_power_user_limits() {
+    local username=$1
+    local resource_type=$2  # cpu, memory, gpu
+    
+    if [ -f "$POWER_USERS_FILE" ]; then
+        local user_line=$(grep "^$username:" "$POWER_USERS_FILE")
+        if [ -n "$user_line" ]; then
+            case "$resource_type" in
+                "cpu") echo "$user_line" | cut -d':' -f2 ;;
+                "memory") echo "$user_line" | cut -d':' -f3 ;;
+                "gpu") echo "$user_line" | cut -d':' -f4 ;;
+                *) echo "" ;;
+            esac
+            return 0
+        fi
+    fi
+    
+    # Si ce n'est pas un power user ou les limites ne sont pas définies, renvoyer les valeurs par défaut
+    case "$resource_type" in
+        "cpu") echo "1" ;;
+        "memory") echo "2g" ;;
+        "gpu") echo "0" ;;
+        *) echo "" ;;
+    esac
 }
 
 # Vérifie si un conteneur existe et est en cours d'exécution
@@ -590,12 +645,52 @@ run_container() {
     local extra_volume_params=$(parse_volumes "$image_name")
     local other_params=$(parse_other_extra_params "$image_name")
     
-    # On utilise les limites spécifiées par l'utilisateur
-    if [ -z "$cpu_limit" ]; then
-        cpu_limit=$(get_image_info "$image_name" "cpu")
-    fi
-    if [ -z "$memory_limit" ]; then
-        memory_limit=$(get_image_info "$image_name" "memory")
+    # Vérifier si l'utilisateur est un power user et appliquer les limites appropriées
+    local is_power_user=false
+    if is_power_user "$username"; then
+        is_power_user=true
+        # Pour les power users, on récupère leurs limites spécifiques
+        if [ -z "$cpu_limit" ]; then
+            cpu_limit=$(get_power_user_limits "$username" "cpu")
+        fi
+        if [ -z "$memory_limit" ]; then
+            memory_limit=$(get_power_user_limits "$username" "memory")
+        fi
+        if [ -z "$gpu_memory_limit" ] && [ "$use_gpu" = "true" ]; then
+            gpu_memory_limit=$(get_power_user_limits "$username" "gpu")
+        fi
+        echo "⚡ Power User détecté: $username. Application des limites étendues."
+    else
+        # Pour les utilisateurs normaux, on applique les limites standard
+        # Limiter à 4 cœurs CPU et 4GB RAM maximum pour les utilisateurs normaux
+        if [ -z "$cpu_limit" ]; then
+            cpu_limit=$(get_image_info "$image_name" "cpu")
+        fi
+        # On s'assure que les limites ne dépassent pas les maximums pour utilisateurs normaux
+        if [ $(echo "$cpu_limit > 4" | bc -l) -eq 1 ]; then
+            cpu_limit="4"
+        fi
+        
+        if [ -z "$memory_limit" ]; then
+            memory_limit=$(get_image_info "$image_name" "memory")
+        fi
+        # Convertir la valeur g/m en valeur numérique
+        if [[ "$memory_limit" =~ ([0-9]+)g ]]; then
+            local mem_value=${BASH_REMATCH[1]}
+            if [ $mem_value -gt 4 ]; then
+                memory_limit="4g"
+            fi
+        elif [[ "$memory_limit" =~ ([0-9]+)m ]]; then
+            local mem_value=${BASH_REMATCH[1]}
+            if [ $mem_value -gt 4096 ]; then
+                memory_limit="4g"
+            fi
+        fi
+        
+        # Limiter la mémoire GPU à 4GB pour les utilisateurs normaux
+        if [ "$use_gpu" = "true" ] && [ -n "$gpu_memory_limit" ] && [ "$gpu_memory_limit" -gt 4096 ]; then
+            gpu_memory_limit="4096"
+        fi
     fi
     
     # Créer le répertoire de données utilisateur s'il n'existe pas
@@ -716,6 +811,14 @@ fi
 [ -z "$cpu_limit" ] && cpu_limit="1"
 [ -z "$memory_limit" ] && memory_limit="2g"
 
+# Vérifier si l'utilisateur est un power user et afficher un message approprié
+power_user_status=""
+if is_power_user "$username"; then
+    power_user_status=" (Power User)"
+    power_limits=$(get_power_user_limits "$username" "cpu"):$(get_power_user_limits "$username" "memory"):$(get_power_user_limits "$username" "gpu")
+    echo -e "⚡ Statut Power User: Actif - Limites maximales: $power_limits"
+fi
+
 if [ "$choice" == "1" ]; then
     if ! user_exists "$username"; then
         echo "❌ Utilisateur inconnu."
@@ -724,6 +827,12 @@ if [ "$choice" == "1" ]; then
     
     stored_hash=$(get_user_password "$username")
     is_valid=$(verify_password "$password" "$stored_hash")
+
+    # Vérifier si l'utilisateur est bloqué
+    if is_blocked_user "$username"; then
+        echo "❌ Cet utilisateur est bloqué. Contacte le techlab pour plus d'informations."
+        exit 1
+    fi
     
     if [ "$is_valid" != "true" ]; then
         echo "❌ Mot de passe incorrect."
@@ -756,11 +865,18 @@ if [ "$choice" == "1" ]; then
         set_user_image "$username" "$image_name"
     fi
     
-    echo "✅ Connexion réussie."
+    echo "✅ Connexion réussie.$power_user_status"
 
 elif [ "$choice" == "2" ]; then
     if user_exists "$username"; then
         echo "❌ Cet utilisateur existe déjà."
+        exit 1
+    fi
+
+    # Vérifier si l'utilisateur est bloqué
+
+    if is_blocked_user "$username"; then
+        echo "❌ Cet utilisateur est bloqué. Contacte le techlab pour plus d'informations."
         exit 1
     fi
     
@@ -776,7 +892,7 @@ elif [ "$choice" == "2" ]; then
     fi
     
     set_user_port "$username" "$free_port"
-    echo "✅ Compte '$username' créé avec succès"
+    echo "✅ Compte '$username' créé avec succès$power_user_status"
 else
     echo "❌ Choix invalide"
     exit 1
@@ -819,6 +935,12 @@ if run_container "$container_name" "$username" "$password" "$image_name" "$user_
     echo -e "\n📊 Ressources attribuées:"
     echo -e "CPU: $cpu_limit cœurs"
     echo -e "Mémoire: $memory_limit"
+    
+    # Afficher l'info Power User si applicable
+    if is_power_user "$username"; then
+        echo -e "⚡ Mode Power User: Actif"
+    fi
+    
     if [ "$use_gpu" = "true" ]; then
         if [ -n "$gpu_memory_limit" ]; then
             echo -e "GPU: Activé avec limite de mémoire de $gpu_memory_limit MiB"
