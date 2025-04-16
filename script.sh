@@ -42,6 +42,7 @@ get_image_info() {
     esac
     
     # Pour les ports supplémentaires (traitement spécial)
+        # Pour les ports supplémentaires (traitement spécial)
     if [ "$info_type" = "extra_ports" ] && [ -f "$IMAGE_FILE" ]; then
         local image_line=$(grep "^$image_name:" "$IMAGE_FILE")
         if [ -n "$image_line" ]; then
@@ -823,7 +824,7 @@ change_password() {
 }
 
 # Menu principal
-read -p "Choix (1/2) : " choice
+read choice # pas utilisé mais a conserver pour la compatibilité
 read -p "Nom d'utilisateur : " username
 read -s -p "Mot de passe : " password
 echo ""  # Saut de ligne après la saisie du mot de passe
@@ -868,84 +869,53 @@ if is_power_user "$username"; then
     echo -e "⚡ Statut Power User: Actif - Limites maximales: $power_limits"
 fi
 
-if [ "$choice" == "1" ]; then
-    if ! user_exists "$username"; then
-        echo "❌ Utilisateur inconnu."
-        exit 1
-    fi
-    
-    stored_hash=$(get_user_password "$username")
-    is_valid=$(verify_password "$password" "$stored_hash")
-
-    # Vérifier si l'utilisateur est bloqué
-    if is_blocked_user "$username"; then
-        echo "❌ Cet utilisateur est bloqué. Contacte le techlab pour plus d'informations."
-        exit 1
-    fi
-    
-    if [ "$is_valid" != "true" ]; then
-        echo "❌ Mot de passe incorrect."
-        exit 1
-    fi
-    
-    # Récupérer l'image associée à l'utilisateur
-    stored_image=$(get_user_image "$username")
-    
-    # Vérifier si l'image a changé - APPROCHE RADICALE
-    if [ -n "$stored_image" ] && [ "$stored_image" != "$image_name" ]; then
-        # Arrêter et supprimer le conteneur existant
-        if container_exists "${CONTAINER_PREFIX}${username}"; then
-            docker stop "${CONTAINER_PREFIX}${username}" >/dev/null 2>&1 || true
-            docker rm "${CONTAINER_PREFIX}${username}" >/dev/null 2>&1 || true
-        fi
-        
-        # Supprimer complètement le répertoire de l'utilisateur
-        rm -rf "$DATA_DIR/$username" 2>/dev/null
-        rm -rf "$DATA_DIR/${username}_config" 2>/dev/null
-        
-        # Recréer les répertoires vides
-        mkdir -p "$DATA_DIR/$username"
-        mkdir -p "$DATA_DIR/${username}_config"
-        
-        # Mettre à jour l'image dans la base de données
-        set_user_image "$username" "$image_name"
-    elif [ -z "$stored_image" ]; then
-        # Si l'utilisateur n'a pas d'image associée, l'enregistrer
-        set_user_image "$username" "$image_name"
-    fi
-    
-    echo "✅ Connexion réussie.$power_user_status"
-
-elif [ "$choice" == "2" ]; then
-    if user_exists "$username"; then
-        echo "❌ Cet utilisateur existe déjà."
-        exit 1
-    fi
-
-    # Vérifier si l'utilisateur est bloqué
-    if is_blocked_user "$username"; then
-        echo "❌ Cet utilisateur est bloqué. Contacte le techlab pour plus d'informations."
-        exit 1
-    fi
-    
-    # Chiffrer le mot de passe avant de le stocker
-    hashed_password=$(encrypt_password "$password")
-    # Ajouter le flag de mot de passe temporaire (1)
-    echo "$username:$hashed_password:$image_name:1" >> "$USER_FILE"
-    
-    # Trouver un port libre et l'enregistrer
-    free_port=$(find_free_port)
-    if [ $? -ne 0 ]; then
-        echo "❌ $free_port"
-        exit 1
-    fi
-    
-    set_user_port "$username" "$free_port"
-    echo "✅ Compte '$username' créé avec succès$power_user_status"
-else
-    echo "❌ Choix invalide"
+# Supprimé la condition de choix 1 ou 2 - Maintenant on ne fait que la connexion
+if ! user_exists "$username"; then
+    echo "❌ Utilisateur inconnu. Contacte un administrateur pour créer un compte."
     exit 1
 fi
+
+stored_hash=$(get_user_password "$username")
+is_valid=$(verify_password "$password" "$stored_hash")
+
+# Vérifier si l'utilisateur est bloqué
+if is_blocked_user "$username"; then
+    echo "❌ Cet utilisateur est bloqué. Contacte le techlab pour plus d'informations."
+    exit 1
+fi
+
+if [ "$is_valid" != "true" ]; then
+    echo "❌ Mot de passe incorrect."
+    exit 1
+fi
+
+# Récupérer l'image associée à l'utilisateur
+stored_image=$(get_user_image "$username")
+
+# Vérifier si l'image a changé - APPROCHE RADICALE
+if [ -n "$stored_image" ] && [ "$stored_image" != "$image_name" ]; then
+    # Arrêter et supprimer le conteneur existant
+    if container_exists "${CONTAINER_PREFIX}${username}"; then
+        docker stop "${CONTAINER_PREFIX}${username}" >/dev/null 2>&1 || true
+        docker rm "${CONTAINER_PREFIX}${username}" >/dev/null 2>&1 || true
+    fi
+    
+    # Supprimer complètement le répertoire de l'utilisateur
+    rm -rf "$DATA_DIR/$username" 2>/dev/null
+    rm -rf "$DATA_DIR/${username}_config" 2>/dev/null
+    
+    # Recréer les répertoires vides
+    mkdir -p "$DATA_DIR/$username"
+    mkdir -p "$DATA_DIR/${username}_config"
+    
+    # Mettre à jour l'image dans la base de données
+    set_user_image "$username" "$image_name"
+elif [ -z "$stored_image" ]; then
+    # Si l'utilisateur n'a pas d'image associée, l'enregistrer
+    set_user_image "$username" "$image_name"
+fi
+
+echo "✅ Connexion réussie.$power_user_status"
 
 # Container associé à l'utilisateur
 container_name="${CONTAINER_PREFIX}${username}"
@@ -976,7 +946,7 @@ if run_container "$container_name" "$username" "$password" "$image_name" "$user_
 
     # Affiche les infos de connexion
     IP=$(hostname -I | awk '{print $1}')
-    echo -e "\n🖥️  Connecte-toi avec RDP sur : $IP:$user_port"
+    echo -e "\n🖥️ Connecte-toi avec RDP sur : $IP:$user_port"
     echo -e "👤 USER : $username"
     echo -e "🔑 MOT DE PASSE : $password"
     
@@ -988,7 +958,7 @@ if run_container "$container_name" "$username" "$password" "$image_name" "$user_
     # Afficher les ressources attribuées
     echo -e "\n📊 Ressources attribuées:"
     echo -e "CPU: $cpu_limit cœurs"
-    echo -e "Mémoire: $memory_limit"
+    echo -e "Mémoire RAM: $memory_limit"
     
     # Afficher l'info Power User si applicable
     if is_power_user "$username"; then

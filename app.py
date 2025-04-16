@@ -3,7 +3,8 @@ import subprocess
 import tempfile
 import os
 import re
-import bcrypt
+import bcrypt  
+import shlex
 
 app = Flask(__name__)
 
@@ -716,13 +717,8 @@ HTML_TEMPLATE = '''
 
     <div class="container">
         <form id="scriptForm">
-            <div class="form-group">
-                <label for="choice"><i class="fas fa-tasks"></i> Action :</label>
-                <select id="choice" name="choice">
-                    <option value="1">1. Se connecter</option>
-                    <option value="2">2. Créer un compte</option>
-                </select>
-            </div>
+            <!-- MODIFICATION ICI: On supprime l'option de choix entre connexion et création de compte -->
+            <input type="hidden" id="choice" name="choice" value="1">
             
             <div class="form-group">
                 <label for="username"><i class="fas fa-user"></i> Nom d'utilisateur :</label>
@@ -824,7 +820,7 @@ HTML_TEMPLATE = '''
                 </div>
             </div>
             
-            <button type="submit"><i class="fas fa-play"></i> Exécuter</button>
+            <button type="submit"><i class="fas fa-play"></i> Se Connecter</button>
         </form>
     </div>
     
@@ -835,7 +831,7 @@ HTML_TEMPLATE = '''
     
     <div class="info-box">
         <h3><i class="fas fa-question-circle"></i> Comment se connecter</h3>
-        <p>Après avoir créé un compte ou t'être connecté, un bureau virtuel Linux sera mis à ta disposition.</p>
+        <p>Après t'être connecté, un bureau virtuel Linux sera mis à ta disposition.</p>
         <p>Pour t'y connecter :</p>
         
         <i class="fas fa-download"></i> Utilise un client RDP comme Remmina, Microsoft Remote Desktop ou FreeRDP
@@ -1231,11 +1227,10 @@ def change_password_route():
     
     print(f"Tentative de changement de mot de passe pour: {username}")
     
-    # Vérifier si l'utilisateur existe
+    # Vérifier si l'utilisateur existe - utiliser subprocess.run avec des arguments séparés
     try:
         user_check = subprocess.run(
-            f"bash -c 'source ./password_utils.sh && user_exists \"{username}\" && echo true || echo false'",
-            shell=True, 
+            ["bash", "-c", f"source ./password_utils.sh && user_exists {shlex.quote(username)} && echo true || echo false"],
             capture_output=True,
             text=True
         )
@@ -1249,12 +1244,11 @@ def change_password_route():
     
     # Vérifier le mot de passe actuel
     try:
-        get_pwd_cmd = f"bash -c 'source ./password_utils.sh && get_user_password \"{username}\"'"
-        stored_hash = subprocess.check_output(get_pwd_cmd, shell=True, text=True).strip()
+        get_pwd_cmd = ["bash", "-c", f"source ./password_utils.sh && get_user_password {shlex.quote(username)}"]
+        stored_hash = subprocess.check_output(get_pwd_cmd, text=True).strip()
         print(f"Hash récupéré pour {username}: {stored_hash}")
         
-        # CORRECTION ICI: Au lieu d'appeler le script Bash, utilisez directement bcrypt en Python
-        import bcrypt
+        # Utiliser directement bcrypt en Python
         is_valid = bcrypt.checkpw(current_password.encode(), stored_hash.encode())
         print(f"Résultat de la vérification: {is_valid}")
         
@@ -1272,9 +1266,18 @@ def change_password_route():
     if len(new_password) < 8:
         return "Le nouveau mot de passe doit contenir au moins 8 caractères", 400
     
-    # Changer le mot de passe
+    # Changer le mot de passe - utiliser subprocess.run avec des arguments séparés
     print(f"Tentative de changement du mot de passe pour {username}")
-    success = change_password(username, new_password)
+    try:
+        result = subprocess.run(
+            ["bash", "-c", f"source ./password_utils.sh && change_password {shlex.quote(username)} {shlex.quote(new_password)}"],
+            capture_output=True,
+            text=True
+        )
+        success = result.returncode == 0
+    except Exception as e:
+        print(f"Exception lors du changement de mot de passe: {str(e)}")
+        success = False
     
     if success:
         print(f"Mot de passe changé avec succès pour {username}")
@@ -1285,7 +1288,8 @@ def change_password_route():
 
 @app.route('/execute', methods=['POST'])
 def execute_script():
-    choice = request.form.get('choice', '1')
+    # Nous forçons maintenant le choix 1 (connexion uniquement)
+    choice = "1"
     username = request.form.get('username', '')
     password = request.form.get('password', '')
     image = request.form.get('image', 'xfce_gui_container')
@@ -1298,8 +1302,12 @@ def execute_script():
     power_limits = get_power_user_limits(username) if power_user_status else None
     
     # Récupérer les limites de ressources
-    cpu_limit = float(request.form.get('cpu_limit', '1'))
-    memory_limit = float(request.form.get('memory_limit', '2'))
+    try:
+        cpu_limit = float(request.form.get('cpu_limit', '1'))
+        memory_limit = float(request.form.get('memory_limit', '2'))
+    except ValueError:
+        # Protection contre les valeurs non numériques
+        return "Valeurs de ressources non valides", 400
     
     # Appliquer les limites en fonction du statut power user
     if power_user_status and power_limits:
@@ -1330,6 +1338,13 @@ def execute_script():
     # Gérer la mémoire GPU selon le statut power user
     gpu_memory_limit = request.form.get('gpu_memory_limit', '0') if use_gpu == "o" else "0"
     
+    try:
+        # Convertir en entier pour vérification
+        gpu_memory_limit_int = int(gpu_memory_limit)
+    except ValueError:
+        # Protection contre les valeurs non numériques
+        return "Valeur de mémoire GPU non valide", 400
+    
     # Ici, la correction: si l'utilisateur a choisi "Maximum" (valeur 0) et n'est pas power user
     # on définit une limite de 4096 MiB (4 GB) au lieu de laisser illimité
     if use_gpu == "o":
@@ -1351,12 +1366,12 @@ def execute_script():
                 if gpu_max != 'unlimited':
                     try:
                         gpu_max = int(gpu_max)
-                        gpu_memory_limit = min(int(gpu_memory_limit), gpu_max)
+                        gpu_memory_limit = str(min(int(gpu_memory_limit), gpu_max))
                     except:
                         pass  # Garde la valeur entrée si la conversion échoue
             else:
                 # Limiter à 4 GB (4096 MiB) pour les utilisateurs normaux
-                gpu_memory_limit = min(int(gpu_memory_limit), 4096)
+                gpu_memory_limit = str(min(int(gpu_memory_limit), 4096))
     
     # Créer un fichier temporaire avec les entrées
     with tempfile.NamedTemporaryFile(mode='w', delete=False) as temp:
@@ -1369,10 +1384,9 @@ def execute_script():
         temp_name = temp.name
     
     try:
-        # Exécuter le script avec les entrées du fichier et s'assurer que stdin est correctement géré
+        # Exécuter le script avec les entrées du fichier de manière sécurisée
         result = subprocess.run(
-            f"cat {temp_name} | bash ./script.sh", 
-            shell=True, 
+            ["bash", "-c", f"cat {shlex.quote(temp_name)} | bash ./script.sh"],
             capture_output=True, 
             text=True,
             encoding='utf-8',
