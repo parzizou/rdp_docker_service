@@ -1,13 +1,15 @@
-from flask import Flask, request, render_template_string
+from flask import Flask, request, render_template_string, jsonify
 import subprocess
 import tempfile
 import os
 import re
+import bcrypt
 
 app = Flask(__name__)
 
 # Constantes pour les fichiers de configuration
 POWER_USERS_FILE = "power_users.txt"
+USER_FILE = "users.txt"  # Ajout de cette constante pour le fichier utilisateurs
 
 def is_power_user(username):
     """Vérifie si un utilisateur est un power user"""
@@ -112,8 +114,73 @@ def get_system_resources():
         'gpus': gpus_info
     }
 
-# Template HTML
+# Nouvelles fonctions pour la gestion des mots de passe temporaires
+def user_exists(username):
+    """Vérifie si un utilisateur existe"""
+    try:
+        if os.path.exists(USER_FILE):
+            with open(USER_FILE, 'r') as f:
+                for line in f:
+                    if line.strip() and not line.strip().startswith('#'):
+                        parts = line.strip().split(':')
+                        if parts[0] == username:
+                            return True
+    except Exception as e:
+        print(f"Erreur lors de la vérification de l'existence de l'utilisateur: {str(e)}")
+    return False
 
+def get_user_password(username):
+    """Récupère le mot de passe haché d'un utilisateur"""
+    try:
+        if os.path.exists(USER_FILE):
+            with open(USER_FILE, 'r') as f:
+                for line in f:
+                    if line.strip() and not line.strip().startswith('#'):
+                        parts = line.strip().split(':')
+                        if parts[0] == username and len(parts) >= 2:
+                            return parts[1]
+    except Exception as e:
+        print(f"Erreur lors de la récupération du mot de passe: {str(e)}")
+    return None
+
+def is_temp_password(username):
+    """Vérifie si l'utilisateur doit changer son mot de passe"""
+    try:
+        result = subprocess.run(
+            f"bash -c 'source ./password_utils.sh && is_temp_password \"{username}\" && echo true || echo false'",
+            shell=True, 
+            capture_output=True,
+            text=True
+        )
+        return result.stdout.strip() == "true"
+    except Exception as e:
+        print(f"Erreur lors de la vérification du statut du mot de passe: {str(e)}")
+        return False
+
+def change_password(username, new_password):
+    """Change le mot de passe d'un utilisateur"""
+    try:
+        # Appeler le script utilitaire pour changer le mot de passe
+        result = subprocess.run(
+            f"bash -c 'source ./password_utils.sh && change_password \"{username}\" \"{new_password}\"'",
+            shell=True, 
+            capture_output=True,
+            text=True
+        )
+        
+        # Vérifier si la commande a réussi
+        if result.returncode == 0:
+            print(f"Mot de passe changé avec succès pour {username}, output: {result.stdout}")
+            return True
+        else:
+            print(f"Erreur lors du changement de mot de passe: {result.stderr}")
+            return False
+    except Exception as e:
+        print(f"Exception lors du changement de mot de passe: {str(e)}")
+        return False
+
+
+# Template HTML
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html>
@@ -371,7 +438,7 @@ HTML_TEMPLATE = '''
         }
         
         .hidden {
-            display: none;
+            display: none !important;
         }
         
         .alert-info {
@@ -568,6 +635,38 @@ HTML_TEMPLATE = '''
             text-align: right;
             margin-top: 5px;
         }
+        
+        /* Modal pour le changement de mot de passe */
+        .modal {
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .modal-content {
+            background-color: white;
+            padding: 30px;
+            border-radius: var(--border-radius);
+            box-shadow: var(--box-shadow);
+            width: 90%;
+            max-width: 500px;
+        }
+        
+        .error-message {
+            color: #e74c3c;
+            margin-top: 15px;
+            padding: 10px;
+            background-color: #fde2e2;
+            border-radius: 4px;
+            text-align: center;
+        }
     </style>
 </head>
 <body>
@@ -747,6 +846,30 @@ HTML_TEMPLATE = '''
         
         <p><i class="fas fa-lightbulb"></i> Astuce : plus tu alloues de ressources, plus ton bureau virtuel sera rapide, mais ça consomme plus de ressources du serveur !</p>
     </div>
+    
+    <!-- Modal pour le changement de mot de passe (caché par défaut) -->
+    <div id="password-change-modal" class="modal hidden">
+        <div class="modal-content">
+            <h3><i class="fas fa-key"></i> Changement de mot de passe requis</h3>
+            <p>Tu utilises un mot de passe temporaire. Merci de le changer pour continuer.</p>
+            <form id="password-change-form">
+                <div class="form-group">
+                    <label for="current-password">Mot de passe actuel :</label>
+                    <input type="password" id="current-password" name="current_password" required>
+                </div>
+                <div class="form-group">
+                    <label for="new-password">Nouveau mot de passe :</label>
+                    <input type="password" id="new-password" name="new_password" required>
+                </div>
+                <div class="form-group">
+                    <label for="confirm-password">Confirmer le nouveau mot de passe :</label>
+                    <input type="password" id="confirm-password" name="confirm_password" required>
+                </div>
+                <button type="submit">Changer le mot de passe</button>
+            </form>
+            <div id="password-change-error" class="error-message hidden"></div>
+        </div>
+    </div>
 
     <script>
         // Fonction pour vérifier le statut power user
@@ -852,6 +975,21 @@ HTML_TEMPLATE = '''
             }
         }
         
+        // Fonction pour vérifier si le mot de passe est temporaire
+        async function checkTempPassword(username) {
+            try {
+                const response = await fetch(`/check_temp_password?username=${encodeURIComponent(username)}`);
+                const data = await response.json();
+                
+                if (data.is_temp_password) {
+                    // Afficher la modal de changement de mot de passe
+                    document.getElementById('password-change-modal').classList.remove('hidden');
+                }
+            } catch (error) {
+                console.error('Erreur lors de la vérification du mot de passe temporaire:', error);
+            }
+        }
+        
         // Vérifier le statut power user quand le nom d'utilisateur change
         document.getElementById('username').addEventListener('blur', checkPowerUserStatus);
         
@@ -907,11 +1045,16 @@ HTML_TEMPLATE = '''
             });
         });
         
+        // Lorsque le formulaire est soumis, stocker le nom d'utilisateur
         document.getElementById('scriptForm').addEventListener('submit', function(e) {
             e.preventDefault();
             
             const formData = new FormData(this);
             const outputElement = document.getElementById('output');
+            const username = document.getElementById('username').value;
+            
+            // Stocker le nom d'utilisateur pour vérifier ensuite
+            localStorage.setItem('last_username', username);
             
             outputElement.textContent = "Exécution en cours... ça peut prendre quelques secondes, patiente un peu...";
             outputElement.classList.add('executing');
@@ -927,12 +1070,85 @@ HTML_TEMPLATE = '''
                 
                 // Scroll to result
                 document.querySelector('.result-container').scrollIntoView({ behavior: 'smooth' });
+                
+                // Vérifier si on doit afficher la modal de changement de mot de passe
+                if (data.includes('Connexion réussie') || data.includes('Connecte-toi avec RDP')) {
+                    checkTempPassword(username);
+                }
             })
             .catch(error => {
                 console.error('Error:', error);
                 outputElement.classList.remove('executing');
                 outputElement.textContent = 'Erreur: ' + error;
             });
+        });
+        
+        // Gérer la soumission du formulaire de changement de mot de passe
+        document.getElementById('password-change-form').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const username = localStorage.getItem('last_username');
+            const currentPassword = document.getElementById('current-password').value;
+            const newPassword = document.getElementById('new-password').value;
+            const confirmPassword = document.getElementById('confirm-password').value;
+            
+            // Afficher un message pendant le traitement
+            const errorElement = document.getElementById('password-change-error');
+            errorElement.textContent = "Traitement en cours...";
+            errorElement.style.backgroundColor = "#f0f8ff";  // Bleu clair
+            errorElement.style.color = "#333";
+            errorElement.classList.remove('hidden');
+            
+            // Validation simple côté client
+            if (newPassword !== confirmPassword) {
+                errorElement.textContent = 'Les mots de passe ne correspondent pas';
+                errorElement.style.backgroundColor = "#fde2e2";
+                errorElement.style.color = "#e74c3c";
+                return;
+            }
+            
+            if (newPassword.length < 8) {
+                errorElement.textContent = 'Le mot de passe doit contenir au moins 8 caractères';
+                errorElement.style.backgroundColor = "#fde2e2";
+                errorElement.style.color = "#e74c3c";
+                return;
+            }
+            
+            // Envoyer la requête de changement de mot de passe
+            try {
+                const formData = new FormData();
+                formData.append('username', username);
+                formData.append('current_password', currentPassword);
+                formData.append('new_password', newPassword);
+                formData.append('confirm_password', confirmPassword);
+                
+                console.log("Envoi de la requête de changement de mot de passe...");
+                
+                const response = await fetch('/change_password', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                console.log("Réponse reçue:", response.status);
+                
+                const responseText = await response.text();
+                console.log("Contenu de la réponse:", responseText);
+                
+                if (response.ok) {
+                    // Cacher la modal et afficher un message de succès
+                    document.getElementById('password-change-modal').classList.add('hidden');
+                    alert('Mot de passe changé avec succès! Tu peux maintenant te connecter avec ton nouveau mot de passe.');
+                } else {
+                    errorElement.textContent = responseText;
+                    errorElement.style.backgroundColor = "#fde2e2";
+                    errorElement.style.color = "#e74c3c";
+                }
+            } catch (error) {
+                console.error('Erreur lors du changement de mot de passe:', error);
+                errorElement.textContent = 'Erreur de communication avec le serveur';
+                errorElement.style.backgroundColor = "#fde2e2";
+                errorElement.style.color = "#e74c3c";
+            }
         });
     </script>
 </body>
@@ -998,6 +1214,74 @@ def check_power_user():
         'memory_max': memory_max,
         'gpu_max': gpu_max
     }
+
+@app.route('/check_temp_password')
+def check_temp_password():
+    """Vérifie si un utilisateur doit changer son mot de passe"""
+    username = request.args.get('username', '')
+    return jsonify({'is_temp_password': is_temp_password(username)})
+
+@app.route('/change_password', methods=['POST'])
+def change_password_route():
+    """Route pour changer le mot de passe"""
+    username = request.form.get('username', '')
+    current_password = request.form.get('current_password', '')
+    new_password = request.form.get('new_password', '')
+    confirm_password = request.form.get('confirm_password', '')
+    
+    print(f"Tentative de changement de mot de passe pour: {username}")
+    
+    # Vérifier si l'utilisateur existe
+    try:
+        user_check = subprocess.run(
+            f"bash -c 'source ./password_utils.sh && user_exists \"{username}\" && echo true || echo false'",
+            shell=True, 
+            capture_output=True,
+            text=True
+        )
+        user_exists = user_check.stdout.strip() == "true"
+        if not user_exists:
+            print(f"Utilisateur {username} inconnu")
+            return "Utilisateur inconnu", 400
+    except Exception as e:
+        print(f"Erreur lors de la vérification de l'utilisateur: {str(e)}")
+        return f"Erreur lors de la vérification de l'utilisateur: {str(e)}", 500
+    
+    # Vérifier le mot de passe actuel
+    try:
+        get_pwd_cmd = f"bash -c 'source ./password_utils.sh && get_user_password \"{username}\"'"
+        stored_hash = subprocess.check_output(get_pwd_cmd, shell=True, text=True).strip()
+        print(f"Hash récupéré pour {username}: {stored_hash}")
+        
+        # CORRECTION ICI: Au lieu d'appeler le script Bash, utilisez directement bcrypt en Python
+        import bcrypt
+        is_valid = bcrypt.checkpw(current_password.encode(), stored_hash.encode())
+        print(f"Résultat de la vérification: {is_valid}")
+        
+        if not is_valid:
+            return "Mot de passe actuel incorrect", 400
+    except Exception as e:
+        print(f"Erreur lors de la vérification du mot de passe: {str(e)}")
+        return f"Erreur lors de la vérification du mot de passe: {str(e)}", 500
+    
+    # Vérifier que les nouveaux mots de passe correspondent
+    if new_password != confirm_password:
+        return "Les nouveaux mots de passe ne correspondent pas", 400
+    
+    # Vérifier que le nouveau mot de passe est suffisamment fort
+    if len(new_password) < 8:
+        return "Le nouveau mot de passe doit contenir au moins 8 caractères", 400
+    
+    # Changer le mot de passe
+    print(f"Tentative de changement du mot de passe pour {username}")
+    success = change_password(username, new_password)
+    
+    if success:
+        print(f"Mot de passe changé avec succès pour {username}")
+        return "Mot de passe changé avec succès", 200
+    else:
+        print(f"Erreur lors du changement de mot de passe pour {username}")
+        return "Erreur lors du changement de mot de passe", 500
 
 @app.route('/execute', methods=['POST'])
 def execute_script():

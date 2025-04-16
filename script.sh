@@ -189,12 +189,13 @@ set_user_image() {
     local username=$1
     local image=$2
     local hashed_password=$(get_user_password "$username")
+    local temp_password_flag=$(is_temp_password "$username" && echo "1" || echo "0")
     
     if [ -n "$hashed_password" ]; then
         # Supprime l'ancienne entrée
         sed -i "/^$username:/d" "$USER_FILE"
-        # Ajoute la nouvelle entrée avec l'image
-        echo "$username:$hashed_password:$image" >> "$USER_FILE"
+        # Ajoute la nouvelle entrée avec l'image et conserve le flag de mot de passe temporaire
+        echo "$username:$hashed_password:$image:$temp_password_flag" >> "$USER_FILE"
     fi
 }
 
@@ -773,6 +774,54 @@ run_container() {
 # Appeler la vérification de dépendances au démarrage
 check_dependencies >/dev/null 2>&1
 
+# Fonction pour vérifier si un mot de passe est temporaire
+is_temp_password() {
+    local username=$1
+    grep "^$username:" "$USER_FILE" | cut -d':' -f4 | grep -q "1"
+    return $?
+}
+
+# Fonction pour marquer un mot de passe comme permanent
+set_password_permanent() {
+    local username=$1
+    local current_line=$(grep "^$username:" "$USER_FILE")
+    
+    if [ -n "$current_line" ]; then
+        # Extraire les valeurs actuelles
+        local hashed_pwd=$(echo "$current_line" | cut -d':' -f2)
+        local image=$(echo "$current_line" | cut -d':' -f3)
+        
+        # Supprimer l'ancienne ligne
+        sed -i "/^$username:/d" "$USER_FILE"
+        
+        # Ajouter la nouvelle ligne avec le flag à 0
+        echo "$username:$hashed_pwd:$image:0" >> "$USER_FILE"
+    fi
+}
+
+# Fonction pour changer le mot de passe
+change_password() {
+    local username=$1
+    local new_password=$2
+    local current_line=$(grep "^$username:" "$USER_FILE")
+    
+    if [ -n "$current_line" ]; then
+        # Extraire l'image actuelle
+        local image=$(echo "$current_line" | cut -d':' -f3)
+        
+        # Chiffrer le nouveau mot de passe
+        local new_hashed_password=$(encrypt_password "$new_password")
+        
+        # Supprimer l'ancienne ligne
+        sed -i "/^$username:/d" "$USER_FILE"
+        
+        # Ajouter la nouvelle ligne avec le nouveau mot de passe et le flag à 0
+        echo "$username:$new_hashed_password:$image:0" >> "$USER_FILE"
+        return 0
+    fi
+    return 1
+}
+
 # Menu principal
 read -p "Choix (1/2) : " choice
 read -p "Nom d'utilisateur : " username
@@ -874,7 +923,6 @@ elif [ "$choice" == "2" ]; then
     fi
 
     # Vérifier si l'utilisateur est bloqué
-
     if is_blocked_user "$username"; then
         echo "❌ Cet utilisateur est bloqué. Contacte le techlab pour plus d'informations."
         exit 1
@@ -882,7 +930,8 @@ elif [ "$choice" == "2" ]; then
     
     # Chiffrer le mot de passe avant de le stocker
     hashed_password=$(encrypt_password "$password")
-    echo "$username:$hashed_password:$image_name" >> "$USER_FILE"
+    # Ajouter le flag de mot de passe temporaire (1)
+    echo "$username:$hashed_password:$image_name:1" >> "$USER_FILE"
     
     # Trouver un port libre et l'enregistrer
     free_port=$(find_free_port)
@@ -930,6 +979,11 @@ if run_container "$container_name" "$username" "$password" "$image_name" "$user_
     echo -e "\n🖥️  Connecte-toi avec RDP sur : $IP:$user_port"
     echo -e "👤 USER : $username"
     echo -e "🔑 MOT DE PASSE : $password"
+    
+    # Afficher un message si c'est un mot de passe temporaire
+    if is_temp_password "$username"; then
+        echo -e "\n⚠️ Ce mot de passe est temporaire. Tu devras le changer à ta première connexion."
+    fi
 
     # Afficher les ressources attribuées
     echo -e "\n📊 Ressources attribuées:"
