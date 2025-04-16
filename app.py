@@ -36,9 +36,9 @@ def get_power_user_limits(username):
                         parts = line.strip().split(':')
                         if parts[0] == username and len(parts) >= 4:
                             return {
-                                'cpu': parts[1],
-                                'memory': parts[2],
-                                'gpu_memory': parts[3]
+                                'cpu': "unlimited",
+                                'memory': "unlimited",
+                                'gpu_memory': "unlimited"
                             }
     except Exception as e:
         print(f"Erreur lors de la récupération des limites du power user: {str(e)}")
@@ -709,7 +709,7 @@ HTML_TEMPLATE = '''
             {{ power_limits.memory }} de RAM et 
             {{ power_limits.gpu_memory }} MiB de mémoire GPU.
         {% else %}
-            Pour assurer une répartition équitable des ressources, les limites maximales sont fixées à 4 cœurs CPU, 4 GB de RAM et 4 GB de mémoire GPU.
+            Pour assurer une répartition équitable des ressources, les limites maximales sont fixées à 4 cœurs CPU, 4 GB de RAM et 4 GB de mémoire GPU. Si vous désirez plus de ressources, contactez le techlab.
         {% endif %}
         </p>
     </div>
@@ -806,11 +806,6 @@ HTML_TEMPLATE = '''
                             <div class="gpu-preset-btn" data-value="3072">
                                 <i class="fas fa-fire"></i> Élevé<br>(3GB)
                             </div>
-                            {% if is_power_user and power_gpu_max > 4096 %}
-                            <div class="gpu-preset-btn" data-value="{{ power_gpu_max }}">
-                                <i class="fas fa-bolt"></i> Power<br>({{ power_gpu_max // 1024 }}GB)
-                            </div>
-                            {% endif %}
                         </div>
                         <p class="value-display">
                             Mémoire GPU sélectionnée : <span id="gpu_memory_display">Pas de limite {% if is_power_user %}({{ power_limits.gpu_memory }} MiB max){% else %}(4GB max){% endif %}</span>
@@ -831,7 +826,7 @@ HTML_TEMPLATE = '''
     
     <div class="info-box">
         <h3><i class="fas fa-question-circle"></i> Comment se connecter</h3>
-        <p>Après t'être connecté, un bureau virtuel Linux sera mis à ta disposition.</p>
+        <p>Après t'être connecté, un Docker sera mis à ta disposition.</p>
         <p>Pour t'y connecter :</p>
         
         <i class="fas fa-download"></i> Utilise un client RDP comme Remmina, Microsoft Remote Desktop ou FreeRDP
@@ -868,6 +863,15 @@ HTML_TEMPLATE = '''
     </div>
 
     <script>
+
+        document.addEventListener('DOMContentLoaded', function() {
+            // S'assurer que la case use_gpu est décochée au chargement
+            document.getElementById('use_gpu').checked = false;
+            
+            // S'assurer que les options GPU sont cachées au chargement
+            document.getElementById('gpu-options').classList.add('hidden');
+        });
+
         // Fonction pour vérifier le statut power user
         async function checkPowerUserStatus() {
             const username = document.getElementById('username').value;
@@ -918,24 +922,6 @@ HTML_TEMPLATE = '''
                                     break;
                                 }
                             }
-                            
-                            if (!powerButton && gpuOptions) {
-                                const newButton = document.createElement('div');
-                                newButton.className = 'gpu-preset-btn';
-                                newButton.dataset.value = data.limits.gpu_memory;
-                                const gbValue = Math.floor(parseInt(data.limits.gpu_memory) / 1024);
-                                newButton.innerHTML = `<i class="fas fa-bolt"></i> Power<br>(${gbValue}GB)`;
-                                gpuOptions.appendChild(newButton);
-                                
-                                // Ajouter l'event listener au nouveau bouton
-                                newButton.addEventListener('click', function() {
-                                    document.querySelectorAll('.gpu-preset-btn').forEach(btn => btn.classList.remove('active'));
-                                    this.classList.add('active');
-                                    document.getElementById('gpu_memory_limit').value = this.dataset.value;
-                                    document.getElementById('gpu_memory_display').textContent = this.dataset.value == 0 ? 
-                                        `Pas de limite (${data.limits.gpu_memory} MiB max)` : `${this.dataset.value} MiB`;
-                                });
-                            }
                         }
                     }
                 } else {
@@ -945,7 +931,7 @@ HTML_TEMPLATE = '''
                     
                     // Mettre à jour le message d'alerte
                     const alertBox = document.querySelector('.alert-info p');
-                    alertBox.innerHTML = '<strong><i class="fas fa-info-circle"></i> Note :</strong> Pour assurer une répartition équitable des ressources, les limites maximales sont fixées à 4 cœurs CPU, 4 GB de RAM et 4 GB de mémoire GPU.';
+                    alertBox.innerHTML = '<strong><i class="fas fa-info-circle"></i> Note :</strong> Pour assurer une répartition équitable des ressources, les limites maximales sont fixées à 4 cœurs CPU, 4 GB de RAM et 4 GB de mémoire GPU. Si vous désirez plus de ressources, contactez le techlab.';
                     
                     // Mettre à jour le message du GPU
                     const gpuDisplay = document.getElementById('gpu_memory_display');
@@ -959,12 +945,6 @@ HTML_TEMPLATE = '''
                         presetButtons[0].innerHTML = '<i class="fas fa-rocket"></i> Maximum<br>(4GB max)';
                     }
                     
-                    // Supprimer les boutons power user s'ils existent
-                    presetButtons.forEach(btn => {
-                        if (parseInt(btn.dataset.value) > 4096) {
-                            btn.remove();
-                        }
-                    });
                 }
             } catch (error) {
                 console.error('Erreur lors de la vérification du statut power user:', error);
@@ -1159,7 +1139,7 @@ def index():
                                  images=images, 
                                  resources=resources,
                                  is_power_user=False,
-                                 power_limits={'cpu': '8', 'memory': '16g', 'gpu_memory': '8192'},
+                                 power_limits={'cpu': '12', 'memory': '32g', 'gpu_memory': '16376'},
                                  power_cpu_max=8,
                                  power_memory_max=16,
                                  power_gpu_max=8192)
@@ -1173,7 +1153,7 @@ def check_power_user():
     limits = get_power_user_limits(username) if power_status else {'cpu': '4', 'memory': '4g', 'gpu_memory': '4096'}
     
     if not limits:
-        limits = {'cpu': '8', 'memory': '16g', 'gpu_memory': '8192'}
+        limits = {'cpu': '12', 'memory': '32g', 'gpu_memory': '16376'}
     
     # Convertir les valeurs en nombres pour le JavaScript
     cpu_max = limits['cpu']
@@ -1187,7 +1167,7 @@ def check_power_user():
     
     memory_max = limits['memory'].replace('g', '')
     if memory_max == 'unlimited':
-        memory_max = 16  # Valeur par défaut si illimité
+        memory_max = 32  # Valeur par défaut si illimité
     else:
         try:
             memory_max = float(memory_max)
@@ -1196,7 +1176,7 @@ def check_power_user():
     
     gpu_max = limits['gpu_memory']
     if gpu_max == 'unlimited':
-        gpu_max = 8192  # Valeur par défaut si illimité
+        gpu_max = 16376  # Valeur par défaut si illimité
     else:
         try:
             gpu_max = int(gpu_max)
@@ -1300,6 +1280,10 @@ def execute_script():
     # Vérifier si c'est un power user
     power_user_status = is_power_user(username)
     power_limits = get_power_user_limits(username) if power_user_status else None
+
+    # Si l'utilisateur est un power user mais qu'on n'a pas de limites, définir des valeurs par défaut
+    if power_user_status and not power_limits:
+        power_limits = {'cpu': 'unlimited', 'memory': 'unlimited', 'gpu_memory': 'unlimited'}
     
     # Récupérer les limites de ressources
     try:
@@ -1375,10 +1359,10 @@ def execute_script():
     
     # Créer un fichier temporaire avec les entrées
     with tempfile.NamedTemporaryFile(mode='w', delete=False) as temp:
+        # Les variables cpu_limit et memory_limit contiennent déjà les bonnes valeurs
+        # après les vérifications précédentes, donc tu peux les utiliser directement:
         temp.write(f"{choice}\n{username}\n{password}\n{image}\n")
-        # Écrire les limites de ressources
         temp.write(f"{cpu_limit}\n{memory_limit}\n{use_gpu}\n")
-        # Écrire la limite de mémoire GPU si nécessaire
         if use_gpu == "o":
             temp.write(f"{gpu_memory_limit}\n")
         temp_name = temp.name

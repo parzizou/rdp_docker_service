@@ -9,8 +9,12 @@ import json
 import time
 import argparse
 import shutil
+import random
+import string
 from datetime import datetime
 import threading
+import bcrypt
+import getpass
 
 # Couleurs pour le terminal
 class Colors:
@@ -27,6 +31,10 @@ class Colors:
 # Constantes pour les fichiers de configuration
 POWER_USERS_FILE = "power_users.txt"
 BLOCKED_USERS_FILE = "blocked_users.txt"
+USER_FILE = "users.txt"
+PORT_FILE = "port_map.txt"
+START_PORT = 3390
+MAX_PORT = 3490
 
 # Cache global pour les infos GPU
 _gpu_info_cache = None
@@ -114,22 +122,15 @@ def get_container_gpu_usage(container_id):
 
 # Nouvelles fonctions pour gérer les power users
 def get_power_users():
-    """Récupère la liste des power users et leurs limites"""
-    power_users = {}
+    """Récupère la liste des power users"""
+    power_users = []
     try:
         if os.path.exists(POWER_USERS_FILE):
             with open(POWER_USERS_FILE, 'r') as f:
                 for line in f:
                     line = line.strip()
                     if line and not line.startswith('#'):
-                        parts = line.split(':')
-                        if len(parts) >= 4:
-                            username = parts[0]
-                            power_users[username] = {
-                                'cpu': parts[1],
-                                'memory': parts[2],
-                                'gpu_memory': parts[3]
-                            }
+                        power_users.append(line)
     except Exception as e:
         print(f"Erreur lors de la lecture du fichier {POWER_USERS_FILE}: {e}")
     
@@ -139,54 +140,34 @@ def save_power_users(power_users):
     """Sauvegarde la liste des power users dans le fichier"""
     try:
         with open(POWER_USERS_FILE, 'w') as f:
-            f.write("# Format: username:cpu_limit:memory_limit:gpu_memory_limit\n")
-            for username, limits in power_users.items():
-                f.write(f"{username}:{limits['cpu']}:{limits['memory']}:{limits['gpu_memory']}\n")
+            f.write("# Liste des power users (un par ligne)\n")
+            for username in power_users:
+                f.write(f"{username}\n")
         return True
     except Exception as e:
         print(f"Erreur lors de l'écriture dans le fichier {POWER_USERS_FILE}: {e}")
         return False
 
-def add_power_user(username, cpu_limit="8", memory_limit="16g", gpu_memory_limit="8192"):
+def add_power_user(username):
     """Ajoute un utilisateur à la liste des power users"""
     power_users = get_power_users()
-    power_users[username] = {
-        'cpu': cpu_limit,
-        'memory': memory_limit,
-        'gpu_memory': gpu_memory_limit
-    }
-    return save_power_users(power_users)
+    if username not in power_users:
+        power_users.append(username)
+        return save_power_users(power_users)
+    return True  # Déjà power user
 
 def remove_power_user(username):
     """Supprime un utilisateur de la liste des power users"""
     power_users = get_power_users()
     if username in power_users:
-        del power_users[username]
+        power_users.remove(username)
         return save_power_users(power_users)
-    return False
-
-def update_power_user_limits(username, cpu_limit=None, memory_limit=None, gpu_memory_limit=None):
-    """Met à jour les limites d'un power user existant"""
-    power_users = get_power_users()
-    if username in power_users:
-        if cpu_limit is not None:
-            power_users[username]['cpu'] = cpu_limit
-        if memory_limit is not None:
-            power_users[username]['memory'] = memory_limit
-        if gpu_memory_limit is not None:
-            power_users[username]['gpu_memory'] = gpu_memory_limit
-        return save_power_users(power_users)
-    return False
+    return True  # Déjà pas power user
 
 def is_power_user(username):
     """Vérifie si un utilisateur est un power user"""
     power_users = get_power_users()
     return username in power_users
-
-def get_power_user_limits(username):
-    """Récupère les limites d'un power user"""
-    power_users = get_power_users()
-    return power_users.get(username, None)
 
 # Nouvelles fonctions pour gérer les utilisateurs bloqués
 def get_blocked_users():
@@ -236,6 +217,139 @@ def is_blocked(username):
     """Vérifie si un utilisateur est bloqué"""
     blocked_users = get_blocked_users()
     return username in blocked_users
+
+# Nouvelles fonctions pour la gestion des utilisateurs
+def get_users():
+    """Récupère la liste des utilisateurs depuis le fichier"""
+    users = []
+    try:
+        if os.path.exists(USER_FILE):
+            with open(USER_FILE, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        parts = line.split(':')
+                        if len(parts) >= 2:  # Au moins username:password
+                            username = parts[0]
+                            users.append(username)
+    except Exception as e:
+        print(f"Erreur lors de la lecture du fichier {USER_FILE}: {e}")
+    
+    return users
+
+def user_exists(username):
+    """Vérifie si un utilisateur existe"""
+    try:
+        if os.path.exists(USER_FILE):
+            with open(USER_FILE, 'r') as f:
+                for line in f:
+                    if line.startswith(f"{username}:"):
+                        return True
+    except Exception as e:
+        print(f"Erreur lors de la vérification de l'utilisateur: {e}")
+    
+    return False
+
+def encrypt_password(password):
+    """Chiffre un mot de passe (simulation du processus de hachage)"""
+    try:
+        # Essayer d'appeler la fonction de chiffrement du script initial
+        result = subprocess.check_output(f"echo -n '{password}' | python3 -c 'import bcrypt, sys; print(bcrypt.hashpw(sys.stdin.read().encode(), bcrypt.gensalt()).decode())'", shell=True).decode().strip()
+        return result
+    except Exception as e:
+        print(f"Erreur lors du chiffrement du mot de passe: {e}")
+        # Fallback à une méthode simple si bcrypt échoue
+        return subprocess.check_output(f"echo -n '{password}' | md5sum | awk '{{print $1}}'", shell=True).decode().strip()
+
+def add_user(username, password):
+    """Ajoute un nouvel utilisateur"""
+    if user_exists(username):
+        return False, "L'utilisateur existe déjà"
+    
+    try:
+        # Chiffrer le mot de passe
+        hashed_password = encrypt_password(password)
+        
+        # Ajouter l'utilisateur au fichier users.txt avec l'image par défaut
+        with open(USER_FILE, 'a') as f:
+            # Format: username:password:image:temp_password_flag
+            f.write(f"{username}:{hashed_password}:xfce_gui_container:1\n")
+        
+        # Trouver un port disponible pour l'utilisateur
+        port = find_free_port()
+        if port:
+            # Enregistrer le port pour l'utilisateur
+            with open(PORT_FILE, 'a') as f:
+                f.write(f"{username}:{port}\n")
+            
+            return True, f"Utilisateur {username} créé avec succès. Port assigné: {port}"
+        else:
+            return False, "Impossible de trouver un port disponible"
+    except Exception as e:
+        return False, f"Erreur lors de la création de l'utilisateur: {e}"
+
+def find_free_port(start_port=START_PORT, end_port=MAX_PORT):
+    """Trouve un port libre pour un nouvel utilisateur"""
+    # Récupérer les ports déjà utilisés
+    used_ports = []
+    try:
+        if os.path.exists(PORT_FILE):
+            with open(PORT_FILE, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        parts = line.split(':')
+                        if len(parts) >= 2:
+                            port = int(parts[1])
+                            used_ports.append(port)
+    except Exception as e:
+        print(f"Erreur lors de la lecture des ports: {e}")
+    
+    # Trouver un port libre
+    for port in range(start_port, end_port + 1):
+        if port not in used_ports:
+            # Vérifier si le port est réellement libre sur la machine
+            try:
+                cmd = f"ss -tuln | grep ':{port} '"
+                result = subprocess.run(cmd, shell=True, capture_output=True)
+                if result.returncode != 0:  # Le port n'est pas utilisé
+                    return port
+            except Exception:
+                pass
+    
+    return None  # Aucun port libre trouvé
+
+def reset_password(username, new_password=None):
+    """Réinitialise le mot de passe d'un utilisateur"""
+    if not user_exists(username):
+        return False, "L'utilisateur n'existe pas"
+    
+    try:
+        # Générer un mot de passe aléatoire si aucun n'est fourni
+        if not new_password:
+            new_password = ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(10))
+        
+        # Chiffrer le nouveau mot de passe
+        hashed_password = encrypt_password(new_password)
+        
+        # Lire le fichier et mettre à jour le mot de passe
+        with open(USER_FILE, 'r') as f:
+            lines = f.readlines()
+        
+        with open(USER_FILE, 'w') as f:
+            for line in lines:
+                if line.startswith(f"{username}:"):
+                    parts = line.strip().split(':')
+                    if len(parts) >= 3:
+                        # Garder l'image, mais marquer le mot de passe comme temporaire
+                        image = parts[2] if len(parts) > 2 else "xfce_gui_container"
+                        f.write(f"{username}:{hashed_password}:{image}:1\n")
+                else:
+                    f.write(line)
+        
+        return True, new_password
+    except Exception as e:
+        return False, f"Erreur lors de la réinitialisation du mot de passe: {e}"
 
 def get_containers_basic_info(filter_prefix="gui_user_"):
     """Récupère les ID et noms des conteneurs Docker - version optimisée pour la rapidité"""
@@ -701,6 +815,8 @@ def display_menu():
     print(f"| 8. Afficher le statut détaillé des GPU")
     print(f"| 9. {Colors.YELLOW}Gestion des power users{Colors.END}")
     print(f"| 0. {Colors.RED}Bloquer/débloquer un utilisateur{Colors.END}")
+    print(f"| A. {Colors.CYAN}Ajouter un nouvel utilisateur{Colors.END}")
+    print(f"| R. {Colors.CYAN}Réinitialiser le mot de passe d'un utilisateur{Colors.END}")
     print(f"| q. Quitter")
     print(separator)
     print("Ton choix :")
@@ -1046,16 +1162,13 @@ def manage_power_users(containers):
         if not power_users:
             print(f"| {Colors.YELLOW}Aucun power user défini.{Colors.END}")
         else:
-            print(f"| {'Utilisateur':<20} | {'CPU':<10} | {'Mémoire':<10} | {'GPU (MiB)':<10}")
-            print(f"| {'-'*20} | {'-'*10} | {'-'*10} | {'-'*10}")
-            for username, limits in power_users.items():
-                print(f"| {username:<20} | {limits['cpu']:<10} | {limits['memory']:<10} | {limits['gpu_memory']:<10}")
+            for i, username in enumerate(power_users):
+                print(f"| {i+1}. {username}")
         
         print(separator)
         print(f"| {Colors.BOLD}Actions:{Colors.END}")
         print(f"| 1. Ajouter un power user")
         print(f"| 2. Supprimer un power user")
-        print(f"| 3. Modifier les limites d'un power user")
         print(f"| 0. Retour au menu principal")
         print(separator)
         
@@ -1092,14 +1205,14 @@ def manage_power_users(containers):
                 if 1 <= user_choice <= len(regular_users):
                     username = regular_users[user_choice - 1]
                     
-                    # Demander les limites
-                    print(separator)
-                    print(f"| Limites pour {username} (laisse vide pour les valeurs par défaut)")
-                    cpu_limit = input(f"| CPU (défaut: 8): ") or "8"
-                    memory_limit = input(f"| Mémoire (ex: 16g, défaut: 16g): ") or "16g"
-                    gpu_memory_limit = input(f"| Mémoire GPU en MiB (défaut: 8192): ") or "8192"
-                    
-                    if add_power_user(username, cpu_limit, memory_limit, gpu_memory_limit):
+                    # Demander confirmation
+                    confirm = input(f"{Colors.YELLOW}Confirmer l'ajout de {username} comme power user? (o/N): {Colors.END}")
+                    if confirm.lower() != 'o':
+                        print("Opération annulée.")
+                        input("Appuie sur Entrée pour continuer...")
+                        continue
+                        
+                    if add_power_user(username):
                         print(f"{Colors.GREEN}✓ {username} ajouté comme power user avec succès.{Colors.END}")
                     else:
                         print(f"{Colors.RED}✗ Erreur lors de l'ajout de {username} comme power user.{Colors.END}")
@@ -1122,8 +1235,7 @@ def manage_power_users(containers):
             print(separator)
             
             # Lister les power users
-            power_user_list = list(power_users.keys())
-            for i, username in enumerate(power_user_list):
+            for i, username in enumerate(power_users):
                 print(f"| {i+1}. {username}")
                 
             print(f"| 0. Annuler")
@@ -1132,8 +1244,8 @@ def manage_power_users(containers):
                 user_choice = int(input("Choisis un utilisateur à supprimer (numéro): "))
                 if user_choice == 0:
                     continue
-                if 1 <= user_choice <= len(power_user_list):
-                    username = power_user_list[user_choice - 1]
+                if 1 <= user_choice <= len(power_users):
+                    username = power_users[user_choice - 1]
                     
                     confirm = input(f"{Colors.YELLOW}⚠️ Es-tu sûr de vouloir supprimer {username} des power users? (o/N): {Colors.END}")
                     if confirm.lower() == 'o':
@@ -1143,50 +1255,6 @@ def manage_power_users(containers):
                             print(f"{Colors.RED}✗ Erreur lors de la suppression de {username}.{Colors.END}")
                     else:
                         print("Opération annulée.")
-                else:
-                    print(f"{Colors.RED}Choix invalide.{Colors.END}")
-            except ValueError:
-                print(f"{Colors.RED}Entre un numéro valide.{Colors.END}")
-                
-            input("Appuie sur Entrée pour continuer...")
-                
-        elif choice == '3':
-            # Modifier les limites d'un power user
-            if not power_users:
-                print(f"{Colors.YELLOW}Aucun power user à modifier.{Colors.END}")
-                input("Appuie sur Entrée pour continuer...")
-                continue
-                
-            print(separator)
-            print(f"| {Colors.BOLD}Modifier les limites d'un power user{Colors.END}")
-            print(separator)
-            
-            # Lister les power users
-            power_user_list = list(power_users.keys())
-            for i, username in enumerate(power_user_list):
-                limits = power_users[username]
-                print(f"| {i+1}. {username} (CPU: {limits['cpu']}, Mém: {limits['memory']}, GPU: {limits['gpu_memory']} MiB)")
-                
-            print(f"| 0. Annuler")
-            
-            try:
-                user_choice = int(input("Choisis un utilisateur à modifier (numéro): "))
-                if user_choice == 0:
-                    continue
-                if 1 <= user_choice <= len(power_user_list):
-                    username = power_user_list[user_choice - 1]
-                    current_limits = power_users[username]
-                    
-                    print(separator)
-                    print(f"| Nouvelles limites pour {username} (laisse vide pour garder les valeurs actuelles)")
-                    cpu_limit = input(f"| CPU (actuel: {current_limits['cpu']}): ") or current_limits['cpu']
-                    memory_limit = input(f"| Mémoire (actuel: {current_limits['memory']}): ") or current_limits['memory']
-                    gpu_memory_limit = input(f"| Mémoire GPU en MiB (actuel: {current_limits['gpu_memory']}): ") or current_limits['gpu_memory']
-                    
-                    if update_power_user_limits(username, cpu_limit, memory_limit, gpu_memory_limit):
-                        print(f"{Colors.GREEN}✓ Limites de {username} mises à jour avec succès.{Colors.END}")
-                    else:
-                        print(f"{Colors.RED}✗ Erreur lors de la mise à jour des limites de {username}.{Colors.END}")
                 else:
                     print(f"{Colors.RED}Choix invalide.{Colors.END}")
             except ValueError:
@@ -1346,11 +1414,221 @@ def manage_blocked_users(containers):
             print(f"{Colors.RED}Choix invalide.{Colors.END}")
             input("Appuie sur Entrée pour continuer...")
 
+# Nouvelles fonctions pour les options additionnelles
+def add_new_user():
+    """Interface pour ajouter un nouvel utilisateur"""
+    term_width = get_terminal_width()
+    separator = "+" + "-" * (term_width - 2) + "+"
+    
+    clear_screen()
+    
+    print(f"{Colors.HEADER}{Colors.BOLD}{'=' * term_width}{Colors.END}")
+    title = "AJOUT D'UN NOUVEL UTILISATEUR"
+    padding = (term_width - len(title)) // 2
+    print(f"{Colors.HEADER}{Colors.BOLD}{' ' * padding}{title}{Colors.END}")
+    print(f"{Colors.HEADER}{Colors.BOLD}{'=' * term_width}{Colors.END}")
+    
+    print(separator)
+    print(f"| {Colors.BOLD}Entrez les informations du nouvel utilisateur:{Colors.END}")
+    print(separator)
+    
+    # Demander les informations de l'utilisateur
+    username = input("Nom d'utilisateur: ")
+    
+    # Vérifier si l'utilisateur existe déjà
+    if user_exists(username):
+        print(f"{Colors.RED}✗ L'utilisateur {username} existe déjà.{Colors.END}")
+        input("Appuie sur Entrée pour revenir au menu...")
+        return
+    
+    # Demander le mot de passe ou en générer un
+    generate_pwd = input("Générer un mot de passe aléatoire? (O/n): ")
+    if generate_pwd.lower() in ['n', 'non']:
+        password = ""
+        while not password:
+            password = input("Mot de passe: ")
+            if not password:
+                print(f"{Colors.RED}Le mot de passe ne peut pas être vide.{Colors.END}")
+    else:
+        # Générer un mot de passe aléatoire
+        password = ''.join(random.choice(string.ascii_letters + string.digits) for _ in range(10))
+        print(f"Mot de passe généré: {Colors.GREEN}{password}{Colors.END}")
+    
+    # Confirmation
+    print(separator)
+    print(f"| {Colors.BOLD}Résumé:{Colors.END}")
+    print(f"| Nom d'utilisateur: {username}")
+    print(f"| Mot de passe: {password}")
+    print(separator)
+    
+    confirm = input(f"{Colors.YELLOW}Confirmer la création de l'utilisateur? (O/n): {Colors.END}")
+    if confirm.lower() in ['n', 'non']:
+        print("Création annulée.")
+        input("Appuie sur Entrée pour revenir au menu...")
+        return
+    
+    # Créer l'utilisateur
+    success, message = add_user(username, password)
+    
+    if success:
+        print(f"{Colors.GREEN}✓ {message}{Colors.END}")
+        
+        # Demander si l'utilisateur doit être un power user
+        power_user_choice = input(f"{Colors.YELLOW}Faire de {username} un power user? (o/N): {Colors.END}")
+        if power_user_choice.lower() == 'o':
+            if add_power_user(username):
+                print(f"{Colors.GREEN}✓ {username} ajouté comme power user avec succès.{Colors.END}")
+            else:
+                print(f"{Colors.RED}✗ Erreur lors de l'ajout de {username} comme power user.{Colors.END}")
+
+    input("Appuie sur Entrée pour revenir au menu...")
+
+# Fonction pour la réinitialisation de mot de passe
+def reset_user_password():
+    """Interface pour réinitialiser le mot de passe d'un utilisateur"""
+    term_width = get_terminal_width()
+    separator = "+" + "-" * (term_width - 2) + "+"
+    
+    clear_screen()
+    
+    print(f"{Colors.HEADER}{Colors.BOLD}{'=' * term_width}{Colors.END}")
+    title = "RÉINITIALISATION DE MOT DE PASSE"
+    padding = (term_width - len(title)) // 2
+    print(f"{Colors.HEADER}{Colors.BOLD}{' ' * padding}{title}{Colors.END}")
+    print(f"{Colors.HEADER}{Colors.BOLD}{'=' * term_width}{Colors.END}")
+    
+    # Récupérer la liste des utilisateurs
+    users = get_users()
+    
+    if not users:
+        print(f"{Colors.YELLOW}Aucun utilisateur trouvé.{Colors.END}")
+        input("Appuie sur Entrée pour revenir au menu...")
+        return
+    
+    print(separator)
+    print(f"| {Colors.BOLD}Sélectionne un utilisateur:{Colors.END}")
+    print(separator)
+    
+    # Afficher la liste des utilisateurs
+    for i, username in enumerate(users):
+        is_power = is_power_user(username)
+        is_blocked_user = is_blocked(username)
+        
+        power_info = f"{Colors.YELLOW}[⚡POWER]{Colors.END}" if is_power else ""
+        blocked_info = f"{Colors.RED}[🔒BLOQUÉ]{Colors.END}" if is_blocked_user else ""
+        
+        print(f"| {i+1}. {username} {power_info} {blocked_info}")
+    
+    print(f"| 0. Annuler")
+    print(separator)
+    
+    try:
+        choice = int(input("Choisis un utilisateur (numéro): "))
+        if choice == 0:
+            return
+        
+        if 1 <= choice <= len(users):
+            username = users[choice - 1]
+            
+            # Demander si on veut spécifier un mot de passe ou en générer un aléatoire
+            generate_pwd = input("Générer un mot de passe aléatoire? (O/n): ")
+            
+            if generate_pwd.lower() in ['n', 'non']:
+                password = ""
+                while not password:
+                    password = input("Nouveau mot de passe: ")
+                    if not password:
+                        print(f"{Colors.RED}Le mot de passe ne peut pas être vide.{Colors.END}")
+                
+                # Réinitialiser le mot de passe avec celui fourni
+                success, message = reset_password(username, password)
+            else:
+                # Réinitialiser le mot de passe avec un mot de passe aléatoire
+                success, new_password = reset_password(username)
+                
+                if success:
+                    message = f"Nouveau mot de passe pour {username}: {Colors.GREEN}{new_password}{Colors.END}"
+            
+            if success:
+                print(f"{Colors.GREEN}✓ Mot de passe réinitialisé avec succès.{Colors.END}")
+                print(message)
+            else:
+                print(f"{Colors.RED}✗ {message}{Colors.END}")
+        else:
+            print(f"{Colors.RED}Choix invalide.{Colors.END}")
+    except ValueError:
+        print(f"{Colors.RED}Entre un numéro valide.{Colors.END}")
+    
+    input("Appuie sur Entrée pour revenir au menu...")
+
+
+
+
+
+
+
+
 def main():
     """Fonction principale du tableau de bord"""
     parser = argparse.ArgumentParser(description="Tableau de bord admin pour conteneurs Docker")
     parser.add_argument('-i', '--interval', type=int, default=200, help='Intervalle de rafraîchissement en secondes (0 pour désactiver)')
     args = parser.parse_args()
+
+
+    # Vérification du mot de passe admin
+    PASSWORD_FILE = "admin_password.hash"
+    
+    # Créer le fichier de mot de passe s'il n'existe pas
+    if not os.path.exists(PASSWORD_FILE):
+        import hashlib
+        import getpass
+        print(f"{Colors.YELLOW}Configuration initiale du mot de passe admin{Colors.END}")
+        admin_password = getpass.getpass("Choisis un mot de passe admin: ")
+        confirm_password = getpass.getpass("Confirme le mot de passe: ")
+        
+        if admin_password != confirm_password:
+            print(f"{Colors.RED}Les mots de passe ne correspondent pas. Essaie à nouveau.{Colors.END}")
+            sys.exit(1)
+        
+        # Hasher le mot de passe avec sel
+        import secrets
+        salt = secrets.token_hex(8)
+        password_hash = hashlib.sha256((admin_password + salt).encode()).hexdigest()
+        
+        # Sauvegarder le hash et le sel dans le fichier
+        with open(PASSWORD_FILE, 'w') as f:
+            f.write(f"{salt}:{password_hash}")
+        
+        print(f"{Colors.GREEN}Mot de passe admin configuré avec succès !{Colors.END}")
+    
+    # Vérifier le mot de passe
+    import hashlib
+    import getpass
+    
+    # Lire le hash et le sel du fichier
+    with open(PASSWORD_FILE, 'r') as f:
+        stored_data = f.read().strip()
+        
+    salt, stored_hash = stored_data.split(':')
+    
+    # Demander le mot de passe
+    password_attempts = 0
+    max_attempts = 3
+    
+    while password_attempts < max_attempts:
+        entered_password = getpass.getpass("Mot de passe admin: ")
+        calculated_hash = hashlib.sha256((entered_password + salt).encode()).hexdigest()
+        
+        if calculated_hash == stored_hash:
+            break
+        else:
+            password_attempts += 1
+            remaining = max_attempts - password_attempts
+            if remaining > 0:
+                print(f"{Colors.RED}Mot de passe incorrect ! {remaining} tentative(s) restante(s).{Colors.END}")
+            else:
+                print(f"{Colors.RED}Trop de tentatives incorrectes. Fermeture du programme.{Colors.END}")
+                sys.exit(1)
     
     refresh_interval = args.interval
     auto_refresh = refresh_interval > 0
@@ -1510,6 +1788,14 @@ def main():
             elif choice == '0':
                 # Bloquer/débloquer un utilisateur
                 manage_blocked_users(containers)
+                
+            elif choice.lower() == 'a':
+                # Ajouter un nouvel utilisateur
+                add_new_user()
+                
+            elif choice.lower() == 'r':
+                # Réinitialiser le mot de passe d'un utilisateur
+                reset_user_password()
             
             else:
                 print(f"{Colors.RED}Choix invalide. Appuie sur Entrée pour continuer...{Colors.END}")
