@@ -15,7 +15,7 @@ Service local permettant une distribution et une gestion de dockers facilement s
 - `app.py` : Le serveur principal à lancer. C’est une API Flask qui gère les users, les containers, etc.
 - `admin_dashboard.py` : L’interface d’admin pour tout gérer facilement (users, images, ports, etc.).
 - `cleanup_inactive.sh` : Script pour nettoyer les containers inactifs.
-- `script.sh`, `run.sh`, `run_admin.sh` : Scripts pour lancer/arrêter différents services.
+- `script.sh` : Scripts pour lancer/arrêter différents services.
 - `dockerfiles/` : Mets ici tous tes Dockerfile personnalisés.
 - `users.txt` : Liste des users avec leurs hash de mot de passe (à éditer avant premier run).
 - `admin_password.hash` : Hash du mot de passe admin.
@@ -25,8 +25,6 @@ Service local permettant une distribution et une gestion de dockers facilement s
 - `port_map.txt` : Mapping des ports utilisés/attribués.
 - `password_utils.sh` : Utilitaires shell pour la gestion des mots de passe.
 - `cleanup.log` : Log des actions de nettoyage.
-- `README.md` : Ce fichier ! (Lis-le bien...)
-- **⚠️ D’autres fichiers peuvent exister, check le dossier complet ici : [Voir sur GitHub](https://github.com/parzizou/rdp_docker_service/tree/main)**
 
 ## Installation
 
@@ -42,12 +40,11 @@ Service local permettant une distribution et une gestion de dockers facilement s
    ```
 3. Installe les dépendances Python :
    ```bash
-   pip install -r requirements.txt
+   pip install flask
+   pip install bcypt
    ```
-   *(Si tu n’as pas de requirements.txt, installe Flask au minimum !)*
-
 4. Prépare les fichiers de conf :
-    - Mets les users dans `users.txt` avec leur hash de mot de passe (voir password_utils.sh)
+    - Mets les users dans `users.txt` avec leur hash de mot de passe temporaire
     - Vérifie les droits d’exécution sur les scripts :  
       `chmod +x *.sh`
     - Mets à jour `images.txt` avec les images que tu veux rendre dispo.
@@ -56,14 +53,11 @@ Service local permettant une distribution et une gestion de dockers facilement s
    ```bash
    python3 app.py
    ```
-   (ou `./run.sh` si tu préfères passer par le script)
 
 6. (Optionnel) Lance l’admin dashboard :
    ```bash
    python3 admin_dashboard.py
    ```
-   (ou `./run_admin.sh`)
-
 ## Utilisation
 
 - Par défaut, le service tourne sur `localhost:5000` (modifie dans le code si besoin).
@@ -75,15 +69,13 @@ Service local permettant une distribution et une gestion de dockers facilement s
 
 - Ajoute les utilisateurs dans `users.txt` au format :  
   `username:motdepasse_hash`
-- Pour générer un hash :  
-  `./password_utils.sh monsupermotdepasse`
+
 - Les users bloqués vont dans `blocked_users.txt`.
 - Les users "power" dans `power_users.txt` (accès à plus de ressources/options).
 
 ## Gestion des images Docker
 
 - Mets les noms des images autorisées dans `images.txt` (une par ligne).
-- Mets tes Dockerfile custom dans `dockerfiles/`.
 
 ## Scripts utiles
 
