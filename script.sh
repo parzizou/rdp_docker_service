@@ -623,6 +623,8 @@ run_container() {
         -v "$DATA_DIR/$username:/home/$username" \
         -v "$DATA_DIR/${username}_config:/etc/skel" \
         $extra_volume_params \
+        -e NVIDIA_VISIBLE_DEVICES=all \
+        -e NVIDIA_DRIVER_CAPABILITIES=all \
         --restart unless-stopped \
         --cpus="$cpu_limit" \
         --memory="$memory_limit" \
@@ -815,51 +817,59 @@ if run_container "$container_name" "$username" "$password" "$image_name" "$user_
     # Créer le script de nettoyage
     create_cleanup_script >/dev/null 2>&1
 
-    # Affiche les infos de connexion
     IP=$(hostname -I | awk '{print $1}')
-    echo -e "\n🖥️ Connecte-toi avec RDP sur : $IP:$user_port"
-    echo -e "👤 USER : $username"
-    echo -e "🔑 MOT DE PASSE : $password"
-    
-    # Afficher un message si c'est un mot de passe temporaire
-    if is_temp_password "$username"; then
-        echo -e "\n⚠️ Ce mot de passe est temporaire. Tu devras le changer à ta première connexion."
-    fi
+    image_display_name=$(get_image_info "$image_name" "name")
 
-    # Afficher les ressources attribuées
-    echo -e "\n📊 Ressources attribuées:"
-    echo -e "CPU: $cpu_limit cœurs"
-    echo -e "Mémoire RAM: $memory_limit"
-    
-    # Afficher l'info Power User si applicable
-    if is_power_user "$username"; then
-        echo -e "⚡ Mode Power User: Actif"
-    fi
-    
-    if [ "$use_gpu" = "true" ]; then
-        if [ -n "$gpu_memory_limit" ]; then
-            echo -e "GPU: Activé avec limite de mémoire de $gpu_memory_limit MiB"
-        else
-            echo -e "GPU: Activé (sans limite de mémoire)"
-        fi
+    if [[ "$image_name" == "olilanz/pinokio3-unraid-nvidia" ]]; then
+        echo -e "\n🚀 Pinokio 3 est lancé !"
+        echo -e "🌍 Va sur : http://$IP:$user_port pour accéder à ton interface Pinokio."
+        [ "$use_gpu" = "true" ] && echo -e "GPU: Activé"
     else
-        echo -e "GPU: Désactivé"
-    fi
+        echo -e "\n🖥️ Connecte-toi avec RDP sur : $IP:$user_port"
+        echo -e "👤 USER : $username"
+        echo -e "🔑 MOT DE PASSE : $password"
 
-    # Afficher les services supplémentaires si présents
-    for port_mapping in $(get_image_info "$image_name" "extra_ports"); do
-        host_port=$(echo $port_mapping | cut -d':' -f1)
-        container_port=$(echo $port_mapping | cut -d':' -f2)
-        
-        if [ "$container_port" = "5173" ]; then
-            echo -e "📊 Application Web : http://$IP:$host_port"
+        # Afficher un message si c'est un mot de passe temporaire
+        if is_temp_password "$username"; then
+            echo -e "\n⚠️ Ce mot de passe est temporaire. Tu devras le changer à ta première connexion."
         fi
-    done
 
-    # N'afficher l'info sur le script GPU que si le GPU est activé
-    if [ "$use_gpu" = "true" ]; then
-        echo -e "\n🎮 Pour tester le GPU : sudo ./test_gpu.sh"
+        # Afficher les ressources attribuées
+        echo -e "\n📊 Ressources attribuées:"
+        echo -e "CPU: $cpu_limit cœurs"
+        echo -e "Mémoire RAM: $memory_limit"
+        
+        # Afficher l'info Power User si applicable
+        if is_power_user "$username"; then
+            echo -e "⚡ Mode Power User: Actif"
+        fi
+        
+        if [ "$use_gpu" = "true" ]; then
+            if [ -n "$gpu_memory_limit" ]; then
+                echo -e "GPU: Activé avec limite de mémoire de $gpu_memory_limit MiB"
+            else
+                echo -e "GPU: Activé (sans limite de mémoire)"
+            fi
+        else
+            echo -e "GPU: Désactivé"
+        fi
+
+        # Afficher les services supplémentaires si présents
+        for port_mapping in $(get_image_info "$image_name" "extra_ports"); do
+            host_port=$(echo $port_mapping | cut -d':' -f1)
+            container_port=$(echo $port_mapping | cut -d':' -f2)
+            
+            if [ "$container_port" = "5173" ]; then
+                echo -e "📊 Application Web : http://$IP:$host_port"
+            fi
+        done
+
+        # N'afficher l'info sur le script GPU que si le GPU est activé
+        if [ "$use_gpu" = "true" ]; then
+            echo -e "\n🎮 Pour tester le GPU : sudo ./test_gpu.sh"
+        fi
     fi
+
 else
     echo "❌ Échec du démarrage du conteneur. Vérifie les paramètres et réessaie."
 fi
